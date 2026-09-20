@@ -76,15 +76,11 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <summary>
         /// Deletes the book.
         /// </summary>
-        /// <param name="isbn">The isbn.</param>
-        public async Task DeleteAsync(string isbn)
+        /// <param name="book">The book to delete.</param>
+        public async void Delete(Book book)
         {
-            var book = await this.context.Books
-                .FirstOrDefaultAsync(b => b.Isbn == isbn);
-            if (book != null)
-            {
-                this.context.Books.Remove(book);
-            }
+            ArgumentNullException.ThrowIfNull(book);
+            this.context.Books.Remove(book);
         }
     }
 }

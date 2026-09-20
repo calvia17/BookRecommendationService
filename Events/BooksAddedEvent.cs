@@ -10,23 +10,21 @@ namespace RabbitHole.Vision.Worker.Events
         /// <summary>
         /// The added books.
         /// </summary>
-        public IEnumerable<BooksAddedData> AddedBooks { get; }
+        public List<BooksAddedData> AddedBooks { get; }
 
         /// <summary>
         /// The book record.
         /// </summary>
-        /// <param name="Id">The id.</param>
         /// <param name="Isbn">The isbn.</param>
         /// <param name="Name">The name.</param>
         /// <param name="Genres">The genres.</param>
-        public record BooksAddedData(Guid Id, string Isbn, string Name, IEnumerable<GenreType> Genres);
+        public record BooksAddedData(string Isbn, string Name, List<GenreType> Genres);
 
         /// <summary>
         /// Initializes the book added event.
         /// </summary>
         /// <param name="addedBooks">The added books.</param>
-        public BooksAddedEvent(IEnumerable<BooksAddedData> addedBooks)
-            : base(BookEventType.Added)
+        public BooksAddedEvent(List<BooksAddedData> addedBooks)
         {
             this.AddedBooks = addedBooks;
         }

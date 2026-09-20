@@ -6,18 +6,17 @@
     public class BookDeletedEvent : BookEvent
     {
         /// <summary>
-        /// Gets the book id.
+        /// Gets the book isbn.
         /// </summary>
-        public Guid BookId { get; }
+        public string BookIsbn { get; }
 
         /// <summary>
         /// Initializes the book deleted event.
         /// </summary>
-        /// <param name="bookId">The book id.</param>
-        public BookDeletedEvent(Guid bookId)
-            : base(BookEventType.Deleted)
+        /// <param name="bookIsbn">The book isbn.</param>
+        public BookDeletedEvent(string bookIsbn)
         {
-            this.BookId = bookId;
+            this.BookIsbn = bookIsbn;
         }
     }
 }

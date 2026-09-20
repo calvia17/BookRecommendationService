@@ -9,20 +9,8 @@ namespace RabbitHole.Vision.Worker.Events
     [JsonDerivedType(typeof(BooksAddedEvent), "Added")]
     [JsonDerivedType(typeof(BooksUpdatedEvent), "Updated")]
     [JsonDerivedType(typeof(BookDeletedEvent), "Deleted")]
-    public class BookEvent
+    [JsonDerivedType(typeof(RecommendationsRequestedEvent), "RecommendationsRequested")]
+    public abstract class BookEvent
     {
-        /// <summary>
-        /// The book event type.
-        /// </summary>
-        public BookEventType EventType { get; }
-
-        /// <summary>
-        /// Initializes the book event.
-        /// </summary>
-        /// <param name="eventType">The book event type.</param>
-        public BookEvent(BookEventType eventType)
-        {
-            this.EventType = eventType;
-        }
     }
 }

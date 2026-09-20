@@ -6,18 +6,17 @@
     public class RecommendationsRequestedEvent : BookEvent
     {
         /// <summary>
-        /// The book shelf image.
+        /// The book shelf image blob url.
         /// </summary>
-        public byte[] ShelfImage { get; }
+        public string ImageBlobUrl { get; }
 
         /// <summary>
         /// Initializes the recommendations requested event.
         /// </summary>
-        /// <param name="shelfImage">The book shelf image.</param>
-        public RecommendationsRequestedEvent(byte[] shelfImage)
-            : base(BookEventType.RecommendationsRequested)
+        /// <param name="imageBlobUrl">The book shelf image blob url.</param>
+        public RecommendationsRequestedEvent(string imageBlobUrl)
         {
-            this.ShelfImage = shelfImage;
+            this.ImageBlobUrl = imageBlobUrl;
         }
     }
 }

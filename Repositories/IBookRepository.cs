@@ -39,7 +39,7 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <summary>
         /// Deletes the book.
         /// </summary>
-        /// <param name="isbn">The isbn.</param>
-        Task DeleteAsync(string isbn);
+        /// <param name="book">The book to delete.</param>
+        void Delete(Book book);
     }
 }
