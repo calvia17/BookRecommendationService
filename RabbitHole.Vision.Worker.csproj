@@ -10,11 +10,15 @@
   <ItemGroup>
     <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.20.2" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.29.2" />
+    <PackageReference Include="Google.Apis.Books.v1" Version="1.74.0.3331" />
+    <PackageReference Include="Google.GenAI" Version="1.22.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="4.1.2" />
+    <PackageReference Include="System.Numerics.Tensors" Version="10.0.12" />
   </ItemGroup>
 </Project>

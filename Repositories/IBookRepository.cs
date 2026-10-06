@@ -1,4 +1,6 @@
-﻿using RabbitHole.Vision.Worker.Objects;
+﻿using Microsoft.Data.SqlTypes;
+using RabbitHole.Vision.Worker.Objects;
+using RabbitHole.Vision.Worker.Services;
 
 namespace RabbitHole.Vision.Worker.Repositories
 {
@@ -30,16 +32,25 @@ namespace RabbitHole.Vision.Worker.Repositories
         void AddMultiple(IEnumerable<Book> newBooksData);
 
         /// <summary>
+        /// Deletes the book.
+        /// </summary>
+        /// <param name="book">The book to delete.</param>
+        void Delete(Book book);
+
+        /// <summary>
+        /// Gets the recommended books based on the provided book embeddings.
+        /// </summary>
+        /// <param name="bookEmbeddings">The book embeddings.</param>
+        /// <param name="count">The number of recommended books to return.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The recommended books.</returns>
+        Task<List<Book>> GetRecommendedBooksAsync(List<(BookDetails Book, SqlVector<float> Vector)> bookEmbeddings, int count, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Saves the changes.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>The task representing the save operation.</returns>
         Task SaveChangesAsync(CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Deletes the book.
-        /// </summary>
-        /// <param name="book">The book to delete.</param>
-        void Delete(Book book);
     }
 }

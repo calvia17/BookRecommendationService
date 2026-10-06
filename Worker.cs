@@ -68,19 +68,6 @@ namespace RabbitHole.Vision.Worker
                         return;
                     }
                 }
-                else if (bookEvent is BooksUpdatedEvent updatedEvent)
-                {
-                    try
-                    {
-                        await bookService.UpdateBooksAsync(updatedEvent.UpdatedBooks, args.CancellationToken);
-
-                    }
-                    catch (Exception ex) when (ex is ArgumentNullException || ex is DuplicateBookInputException || ex is BookNotFoundException)
-                    {
-                        await args.DeadLetterMessageAsync(args.Message, "ProcessingError", ex.Message, args.CancellationToken);
-                        return;
-                    }
-                }
                 else if (bookEvent is BookDeletedEvent deletedEvent)
                 {
                     try
@@ -103,7 +90,12 @@ namespace RabbitHole.Vision.Worker
                         await this.sender.SendMessageAsync(response, args.CancellationToken);
 
                     }
-                    catch (Exception ex) when (ex is ArgumentNullException)
+                    catch (Exception ex) when (ex is ArgumentException 
+                        or JsonException 
+                        or InvalidImageException 
+                        or BookExtractionException 
+                        or BookIdentificationException 
+                        or EmbeddingCalculationException)
                     {
                         var recommendations = new RecommendationResultMessageDto
                         {

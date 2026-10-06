@@ -1,8 +1,5 @@
-﻿using Microsoft.Data.SqlTypes;
-using RabbitHole.Vision.Worker.Dtos;
-using RabbitHole.Vision.Worker.Objects;
+﻿using RabbitHole.Vision.Worker.Dtos;
 using static RabbitHole.Vision.Worker.Events.BooksAddedEvent;
-using static RabbitHole.Vision.Worker.Events.BooksUpdatedEvent;
 
 namespace RabbitHole.Vision.Worker.Services
 {
@@ -18,14 +15,6 @@ namespace RabbitHole.Vision.Worker.Services
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task that represents the add operation.</returns>
         Task AddBooksAsync(IEnumerable<BooksAddedData> books, CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Updates the books.
-        /// </summary>
-        /// <param name="books">The books to update.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>A task that represents the update operation.</returns>
-        Task UpdateBooksAsync(IEnumerable<BooksUpdatedData> books, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Deletes the book.
