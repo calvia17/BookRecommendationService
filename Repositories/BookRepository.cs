@@ -1,10 +1,14 @@
 ﻿using Google.Apis.Books.v1.Data;
+using Google.GenAI;
 using Microsoft.Data.SqlTypes;
 using Microsoft.EntityFrameworkCore;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Services;
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
+using System.Numerics;
 using System.Numerics.Tensors;
+using System.Runtime.ConstrainedExecution;
 
 namespace RabbitHole.Vision.Worker.Repositories
 {
@@ -14,14 +18,17 @@ namespace RabbitHole.Vision.Worker.Repositories
     public class BookRepository : IBookRepository
     {
         private readonly BookStoreContext context;
+        private readonly IDbContextFactory<BookStoreContext> contextFactory;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BookRepository" /> class.
         /// </summary>
         /// <param name="context">The context.</param>
-        public BookRepository(BookStoreContext context)
+        /// <param name="contextFactory">The context factory.</param>
+        public BookRepository(BookStoreContext context, IDbContextFactory<BookStoreContext> contextFactory)
         {
             this.context = context;
+            this.contextFactory = contextFactory;
         }
 
         /// <summary>
@@ -81,7 +88,7 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <summary>
         /// Gets the recommended books based on the provided book embeddings.
         /// </summary>
-        /// <param name="bookEmbeddings">The normalized book embeddings.</param>
+        /// <param name="bookEmbeddings">The book embeddings.</param>
         /// <param name="numRecommendations">The number of recommended books to return.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>The recommended books.</returns>
@@ -101,11 +108,8 @@ namespace RabbitHole.Vision.Worker.Repositories
             // Cosine similarity is the cosine of the angle between 2 vectors. This tells us if 2 books are similar.
             // The smaller the cosine similarity (cos of the angle), the less similar the 2 vectors are.
             // Cosine distance is 1 - cosine similarity. The smaller the cosine distance, the more similar the 2 vectors are.
-            // Max cosine ddistance = 2 (when angle is 180 degrees, cosine of the angle = -1, so cosine distance = 1 - (-1) = 2)
-            // Angle of 90 degrees to 180 degrees means the 2 vectors are completely different.
-            // Angle of 180 degrees means the 2 vectors are opposite to each other.
-            // For example, if one book is about a topic and the other book is about the opposite of that topic (like one book is about happiness and the other book is about sadness),
-            // the angle between the 2 vectors will be 180 degrees.
+            // Max cosine distance = 2 (when angle is 180 degrees, cosine of the angle = -1, so cosine distance = 1 - (-1) = 2)
+            // Angle of 90 degrees means the 2 vectors are completely unrelated since they share no direction.
 
             // Minimum approach: For each input book embedding, we calculate the cosine distance to all books in the database.
             // Then we take the minimum distance for each stored book to order them.
@@ -128,7 +132,7 @@ namespace RabbitHole.Vision.Worker.Repositories
             // We can improve this further by creating clusters of books in the database and calculating the centroid of each cluster.
             // This reduces the number of database calls from the number of input book embeddings to the number of clusters.
             // It also improves the accuracy of the centroid approach since we would be using the centroid of each cluster rather than the centroid of the entire bookshelf which can lead to a centroid that is not representative of the user's taste profile.
-            // Clustering improves performance but can affecta ccuracy if the clusters have distinct books that cause cluster centroids to point to books that are very different from the books in the cluster.
+            // Clustering improves performance but can affect accuracy if the clusters have distinct books that cause cluster centroids to point to books that are very different from the books in the cluster.
             // So we need to choose a clustering approach that balances performance and accuracy.
             // For each cluster, we allocate slots = (number of books in the cluster / total number of books in the shelf) *count
             // where count is the number of recommended books to return.
@@ -141,7 +145,7 @@ namespace RabbitHole.Vision.Worker.Repositories
             // The issue with this approach is that the accuracy depends on k.
             // If k is too small and the books are very distinct, the cluster centroid can point to very different books than those in the cluster.
             // Even if k is large and all the books are distinct, the cluster centroid can point to books that are not in the cluster.
-            // So k means clustering can inmrove performance by reducing the number of database calls to the cluster size k, but it reduces accuracy.
+            // So k means clustering can improve performance by reducing the number of database calls to the cluster size k, but it reduces accuracy.
 
             // Sequential Leader-Follower Algorithm with Running Centroid Updates: Creating clusters using a running average approach ensures that the centroid of the cluster is always representative of the books in the cluster
             // as long as the threshold for the distance centroid to the new book is kept small enough.
@@ -152,7 +156,7 @@ namespace RabbitHole.Vision.Worker.Repositories
             // This is also better than using a global centroid after the min approach because if the input books have groups of similar size, 
             // the global centroid will pick books that are median to both groups even when there are books that are very similar to the input books in both groups.
             // This will result in mediocre recommendations. We need to give good recommendations.
-            // At each step in this algorithm, we the closest cluster centroid under a threshold distance to the new book and add the book to that cluster.
+            // At each step in this algorithm, we find the closest cluster centroid under a threshold distance to the new book and add the book to that cluster.
             // If there is no cluster centroid under the threshold distance, we create a new cluster with the new book as the centroid.
 
             // Cluster limiting and pruning:
@@ -168,6 +172,19 @@ namespace RabbitHole.Vision.Worker.Repositories
             // 2. SIMD calculations
             // 3. Cluster limiting and pruning
 
+
+            // Creating clusters using Sequential Leader-Follower Algorithm with Running Centroid Updates:
+            // Need to test and tune the threshold distance with test cases like:
+            // Direct Sequels / Same Series (Target: Group Together)
+            //      Harry Potter 1 vs.Harry Potter 2
+            //      Dune vs. Dune Messiah
+            // Same Sub-Genre / Identical Tropes(Target: Group Together)
+            //      Twilight vs. The Vampire Diaries
+            //      The Hunger Games vs.Divergent
+
+            // Different Sub-Genres / Cross - Genre(Target: Separate)
+            //      Twilight vs. Dracula(Classic Gothic Horror vs.YA Vampire Romance)
+            //      Dune vs. Neuromancer(Space Opera vs.Cyberpunk)
             var clusters = new List<Cluster>() { new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), 1) };
 
             // Use a temporary vector to store intermediate vector results to avoid creating new 768 dimensional vectors in each iteration
@@ -213,31 +230,48 @@ namespace RabbitHole.Vision.Worker.Repositories
             }
 
 
-            // Min approach:
-            var books = new List<(Book Book, double Distance)>();
+            // Fetch books from the database for each cluster.
+            var books = new ConcurrentBag<(Book Book, double CentroidDistance)>();
             var inputIsbns = bookEmbeddings.Select(be => be.Book.Isbn).ToHashSet();
+            var filteredBookCount = clusters.Sum(cluster => cluster.Size);
 
-            foreach (var cluster in clusters)
-            {
-                // Multiple with 1.5 to get a buffer incase same book gets added for multiple clusters because that would result in a shorter recommendation list when duplicates are removed.
-                var slots = (int)Math.Ceiling((((float)cluster.Size) / bookEmbeddings.Count) * numRecommendations * 1.5);
+            // TODO: Add retries here.
+            await Parallel.ForEachAsync(
+                clusters,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = 4,
+                    CancellationToken = cancellationToken
+                },
+                async (cluster, cancellationToken) =>
+                {
+                    // Create a new database context for each parallel task because the context is not thread safe and cannot be shared across threads.
+                    await using var dbContext = await this.contextFactory.CreateDbContextAsync(cancellationToken);
 
-                // For each input book embedding, we calculate the distance to each book in the database.
-                var distances = await this.context.Books
-                                    .AsNoTracking()
-                                    .Where(book => !inputIsbns.Contains(book.Isbn))
-                                    .Select(book => new { Book = book, Distance = EF.Functions.VectorDistance("cosine", book.Embedding, new SqlVector<float>(cluster.Centroid)) })
-                                    .OrderBy(book => book.Distance)
-                                    .Take(slots)
-                                    .ToListAsync(cancellationToken);
-                books.AddRange(distances.Select(d => (d.Book, d.Distance)));
-            }
+                    // Multiple with 2 to get a buffer incase same book gets added for multiple clusters because that would result in a shorter recommendation list when duplicates are removed.
+                    var slots = (int)Math.Ceiling((((float)cluster.Size) / filteredBookCount) * numRecommendations * 2); // This can be tuned.
 
-            // Group by book and take the minimum distance for each book.
+                    // For each input book embedding, we calculate the distance to each book in the database.
+                    var clusterCentroid = new SqlVector<float>(cluster.Centroid);
+                    var distances = await dbContext.Books
+                                        .AsNoTracking()
+                                        .Where(book => !inputIsbns.Contains(book.Isbn))
+                                        .Select(book => new { Book = book, CentroidDistance = EF.Functions.VectorDistance("cosine", book.Embedding, clusterCentroid) })
+                                        .OrderBy(book => book.CentroidDistance)
+                                        .Take(slots)
+                                        .ToListAsync(cancellationToken);
+                    foreach (var distance in distances)
+                    {
+                        books.Add((distance.Book, distance.CentroidDistance));
+                    }
+                }
+            );
+
+            // Group by book and take the nearest centroid distance for each book.
             var recommendedBooks = books
                                     .GroupBy(book => book.Book.Isbn)
-                                    .Select(group => new { group.First().Book, MinDistance = group.Min(b => b.Distance) })
-                                    .OrderBy(book => book.MinDistance)
+                                    .Select(group => new { group.First().Book, NearestCentroidDistance = group.Min(b => b.CentroidDistance) })
+                                    .OrderBy(book => book.NearestCentroidDistance)
                                     .Take(numRecommendations) 
                                     .Select(b => b.Book)
                                     .ToList();

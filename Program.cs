@@ -10,7 +10,7 @@ using RabbitHole.Vision.Worker.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-builder.Services.AddDbContext<BookStoreContext>(options =>
+builder.Services.AddDbContextFactory<BookStoreContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 var serviceBusConnectionString = builder.Configuration["ServiceBus:ConnectionString"];
@@ -45,7 +45,6 @@ builder.Services.AddSingleton(new BooksService(new BaseClientService.Initializer
 }));
 
 builder.Services.AddHostedService<Worker>();
-
 builder.Services.AddScoped<IBookService, BookService>();
 builder.Services.AddScoped<IBookRepository, BookRepository>();
 builder.Services.AddScoped<IBlobStorageService>(sp => new BlobStorageService(sp.GetRequiredService<BlobContainerClient>(), blobStorageHost!));
