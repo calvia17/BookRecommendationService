@@ -1,7 +1,9 @@
-﻿using Microsoft.Data.SqlTypes;
+﻿using Google.Apis.Books.v1.Data;
+using Microsoft.Data.SqlTypes;
 using Microsoft.EntityFrameworkCore;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Services;
+using System.Collections.Concurrent;
 using System.Numerics.Tensors;
 
 namespace RabbitHole.Vision.Worker.Repositories
@@ -79,11 +81,11 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <summary>
         /// Gets the recommended books based on the provided book embeddings.
         /// </summary>
-        /// <param name="bookEmbeddings">The book embeddings.</param>
-        /// <param name="count">The number of recommended books to return.</param>
+        /// <param name="bookEmbeddings">The normalized book embeddings.</param>
+        /// <param name="numRecommendations">The number of recommended books to return.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>The recommended books.</returns>
-        public async Task<List<Book>> GetRecommendedBooksAsync(List<(BookDetails Book, SqlVector<float> Vector)> bookEmbeddings, int count, CancellationToken cancellationToken = default)
+        public async Task<List<Book>> GetRecommendedBooksAsync(List<(BookDetails Book, SqlVector<float> Vector)> bookEmbeddings, int numRecommendations, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(bookEmbeddings);
 
@@ -96,8 +98,14 @@ namespace RabbitHole.Vision.Worker.Repositories
             // The length of these vectors does not give us any information about the meaning of the text.
             // The direction of the vector is what determines if 2 vectors are similar.
             // The smaller the angle between 2 vectors, the more similar they are.
-            // Cosine similarity measures the cosine of the angle between 2 vectors
-            // without considering their magnitudes. This tells us if 2 books are similar.
+            // Cosine similarity is the cosine of the angle between 2 vectors. This tells us if 2 books are similar.
+            // The smaller the cosine similarity (cos of the angle), the less similar the 2 vectors are.
+            // Cosine distance is 1 - cosine similarity. The smaller the cosine distance, the more similar the 2 vectors are.
+            // Max cosine ddistance = 2 (when angle is 180 degrees, cosine of the angle = -1, so cosine distance = 1 - (-1) = 2)
+            // Angle of 90 degrees to 180 degrees means the 2 vectors are completely different.
+            // Angle of 180 degrees means the 2 vectors are opposite to each other.
+            // For example, if one book is about a topic and the other book is about the opposite of that topic (like one book is about happiness and the other book is about sadness),
+            // the angle between the 2 vectors will be 180 degrees.
 
             // Minimum approach: For each input book embedding, we calculate the cosine distance to all books in the database.
             // Then we take the minimum distance for each stored book to order them.
@@ -116,69 +124,121 @@ namespace RabbitHole.Vision.Worker.Repositories
             // We should take enough books so that the centroid approach has enough books to choose from.
             // But we should not take too many books that the result contains books that are too far away from the input book vectors.
 
-            // Min approach:
-            var books = new List<(Book Book, double Distance)>(); 
-            var inputIsbns = bookEmbeddings.Select(be => be.Book.Isbn).ToHashSet();
-            foreach (var bookEmbedding in bookEmbeddings)
+            // CLUSTERING: 
+            // We can improve this further by creating clusters of books in the database and calculating the centroid of each cluster.
+            // This reduces the number of database calls from the number of input book embeddings to the number of clusters.
+            // It also improves the accuracy of the centroid approach since we would be using the centroid of each cluster rather than the centroid of the entire bookshelf which can lead to a centroid that is not representative of the user's taste profile.
+            // Clustering improves performance but can affecta ccuracy if the clusters have distinct books that cause cluster centroids to point to books that are very different from the books in the cluster.
+            // So we need to choose a clustering approach that balances performance and accuracy.
+            // For each cluster, we allocate slots = (number of books in the cluster / total number of books in the shelf) *count
+            // where count is the number of recommended books to return.
+            // This ensures that each cluster gets the right share in the recommendation list and correctly represents the user's taste profile.
+            // If a cluster has more books it means that the user will prefer books of that type more and so that cluster should get more slots in the recommendation list.
+
+            // Clustering approaches:
+            // K-means algorithm: We could create clusters using the K-means clustering algorithm: We randomly select k books from the input to be the centroids of the clusters.
+            // For each input book embedding, we calculate the distance to each centroid and assign the book to the cluster with the closest centroid.
+            // The issue with this approach is that the accuracy depends on k.
+            // If k is too small and the books are very distinct, the cluster centroid can point to very different books than those in the cluster.
+            // Even if k is large and all the books are distinct, the cluster centroid can point to books that are not in the cluster.
+            // So k means clustering can inmrove performance by reducing the number of database calls to the cluster size k, but it reduces accuracy.
+
+            // Sequential Leader-Follower Algorithm with Running Centroid Updates: Creating clusters using a running average approach ensures that the centroid of the cluster is always representative of the books in the cluster
+            // as long as the threshold for the distance centroid to the new book is kept small enough.
+            // If the books are very distinct we get clusters with very less or even just 1 book. It reduces performance in this case but ensures accuracy.
+            // If the books are very similar or there are very similar groups, it reduces the number of database calls while preserving accuracy.
+            // It's the best of both worlds - performance and accuracy.
+            // It will also represent taste profiles since we can choose m books representative of each cluster where m = (number of books in the cluster / total number of books in the shelf) * number of books to recommend.
+            // This is also better than using a global centroid after the min approach because if the input books have groups of similar size, 
+            // the global centroid will pick books that are median to both groups even when there are books that are very similar to the input books in both groups.
+            // This will result in mediocre recommendations. We need to give good recommendations.
+            // At each step in this algorithm, we the closest cluster centroid under a threshold distance to the new book and add the book to that cluster.
+            // If there is no cluster centroid under the threshold distance, we create a new cluster with the new book as the centroid.
+
+            // Cluster limiting and pruning:
+            // While performance is important and k means can improve performance more than the running average centroid approach, we should not sacrifice accuracy for performance.
+            // The running average centroid approach will boost performance when it is possible to do so without sacrificing accuracy.
+            // It ensures we give the best recommendations.
+            // The only issue with this is that if the user uploads a very large shelf which is very distinct, there can be a huge number of clusters.
+            // This can result in high number of database calls significantly reducing performance.
+            // What we can do in this case is, if the number of clusters is greater than a threshold clusterLimit, we can remove the clusters with the least number of books until we are below the threshold.
+
+            // Performance enhancements of this method:
+            // 1. Parallel processing
+            // 2. SIMD calculations
+            // 3. Cluster limiting and pruning
+
+            var clusters = new List<Cluster>() { new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), 1) };
+
+            // Use a temporary vector to store intermediate vector results to avoid creating new 768 dimensional vectors in each iteration
+            // which can be expensive in terms of memory allocation and garbage collection.
+            var intermediateVector = new float[clusters[0].Centroid.Length];
+            for (var i = 1; i < bookEmbeddings.Count; i++)
             {
+                // Use standard for loop here instead of linq or foreach since it will be much faster.
+                // Each embedding has 768 dimensions. So the difference in performance will be significant especially when the number of books in the shelf is large.
+                var minDistance = float.MaxValue;
+                Cluster? closestCluster = null;
+                for (var j = 0; j < clusters.Count; j++)
+                {
+                    var distance = 1 - TensorPrimitives.CosineSimilarity(clusters[j].Centroid, bookEmbeddings[i].Vector.Memory.Span);
+                    if (distance < minDistance)
+                    {
+                        closestCluster = clusters[j];
+                        minDistance = distance;
+                    }
+                }
+
+                // Threshold distance = 0.2 (cosine similarity = 0.8, angle = 36.9 degrees)
+                if (closestCluster != null && minDistance < 0.2) // Might need to increase this.
+                {
+                    // Update the centroid to include the new book in the cluster.
+                    var newSize = closestCluster.Size + 1;
+                    TensorPrimitives.Subtract(bookEmbeddings[i].Vector.Memory.Span, closestCluster.Centroid, intermediateVector);
+                    TensorPrimitives.Divide(intermediateVector, newSize, intermediateVector);
+                    TensorPrimitives.Add(closestCluster.Centroid, intermediateVector, closestCluster.Centroid);
+                    closestCluster.Size = newSize;
+                }
+                else
+                {
+                    clusters.Add(new Cluster(bookEmbeddings[i].Vector.Memory.Span.ToArray(), 1));
+                }
+            }
+
+            // Cluster limiting and pruning:
+            if (clusters.Count > 20)
+            {
+                // Remove the clusters with the least number of books.
+                clusters = clusters.OrderByDescending(c => c.Size).Take(20).ToList();
+            }
+
+
+            // Min approach:
+            var books = new List<(Book Book, double Distance)>();
+            var inputIsbns = bookEmbeddings.Select(be => be.Book.Isbn).ToHashSet();
+
+            foreach (var cluster in clusters)
+            {
+                // Multiple with 1.5 to get a buffer incase same book gets added for multiple clusters because that would result in a shorter recommendation list when duplicates are removed.
+                var slots = (int)Math.Ceiling((((float)cluster.Size) / bookEmbeddings.Count) * numRecommendations * 1.5);
+
                 // For each input book embedding, we calculate the distance to each book in the database.
                 var distances = await this.context.Books
                                     .AsNoTracking()
                                     .Where(book => !inputIsbns.Contains(book.Isbn))
-                                    .Select(book => new { Book = book, Distance = EF.Functions.VectorDistance("cosine", book.Embedding, bookEmbedding.Vector) })
+                                    .Select(book => new { Book = book, Distance = EF.Functions.VectorDistance("cosine", book.Embedding, new SqlVector<float>(cluster.Centroid)) })
                                     .OrderBy(book => book.Distance)
-                                    .Take(count * 3)
+                                    .Take(slots)
                                     .ToListAsync(cancellationToken);
                 books.AddRange(distances.Select(d => (d.Book, d.Distance)));
             }
 
             // Group by book and take the minimum distance for each book.
-            var filteredBooks = books
+            var recommendedBooks = books
                                     .GroupBy(book => book.Book.Isbn)
                                     .Select(group => new { group.First().Book, MinDistance = group.Min(b => b.Distance) })
                                     .OrderBy(book => book.MinDistance)
-                                    .Take(count * 3)
-                                    .Select(b => (b.Book, b.MinDistance))
-                                    .ToList();
-
-            // Centroid approach:
-            var embeddingLength = bookEmbeddings.First().Vector.Length;
-            var centroid = new float[embeddingLength];
-            foreach (var embedding in bookEmbeddings)
-            {
-                var embeddingSpan = embedding.Vector.Memory.Span;
-                for (var i = 0; i < embeddingLength; i++)
-                {
-                    centroid[i] += embeddingSpan[i];
-                }
-            }
-
-            for (var i = 0; i < embeddingLength; i++)
-            {
-                centroid[i] /= bookEmbeddings.Count;
-            }
-
-            var recommendedBooks = filteredBooks
-                                    .Select(book =>
-                                    {
-                                        // Calculates the cosine similarity between the book's embedding and the centroid vector.
-                                        // Cosine similarity is just the cosine of the angle between the two vectors.
-                                        // We can manually compute this using the formula: cosine similarity = a.b / (|a| * |b|).
-                                        // But Tensor Primitives uses SIMD to compute this which makes the CPU compute it faster.
-                                        var cosineSimilarity = TensorPrimitives.CosineSimilarity(book.Book.Embedding.Memory.Span, centroid);
-
-                                        // Cosine distance = 1 - cosine similarity.
-                                        // This is a measure of how close the 2 vectors are.
-                                        // The smaller the angle between the 2 vectors, the larger the cosine similarity.
-                                        // So we calculate the cosine distance such that the smaller the distance, the more similar the 2 vectors are.
-                                        var centroidDistance = 1 - cosineSimilarity;
-
-                                        // We can tune the weights depending on how much we want to weight the minimum distance vs the centroid distance.
-                                        var hybridDistance = 0.4 * book.MinDistance + 0.6 * centroidDistance;
-                                        return (book.Book, hybridDistance);
-                                    })
-                                    .OrderBy(book => book.hybridDistance)
-                                    .Take(count)
+                                    .Take(numRecommendations) 
                                     .Select(b => b.Book)
                                     .ToList();
 

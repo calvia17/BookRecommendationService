@@ -321,8 +321,12 @@ namespace RabbitHole.Vision.Worker.Services
                 });
             }
 
+            // From Gemini docs: While the default 3072-dimension embeddings are always normalized, Gemini Embedding 2 also auto-normalizes truncated dimensions (e.g., 768, 1536).
+            // This ensures semantic similarity is calculated via vector direction rather than magnitude, providing more accurate results out of the box.
+            // Older Models: If you are using gemini-embedding - 001, you must manually normalize non - 3072 dimensions.
+            // So we use "gemini-embedding-2" for embeddings since we need normalized embeddings to calculate cosine similarity for book recommendations.
             var embedding = await this.gemini.Models.EmbedContentAsync(
-                "gemini-embedding-001",
+                "gemini-embedding-2",
                 contents: embeddingContent!,
                 embeddingConfig,
                 cancellationToken);
