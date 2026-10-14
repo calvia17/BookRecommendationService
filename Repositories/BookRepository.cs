@@ -1,14 +1,10 @@
-﻿using Google.Apis.Books.v1.Data;
-using Google.GenAI;
-using Microsoft.Data.SqlTypes;
+﻿using Microsoft.Data.SqlTypes;
 using Microsoft.EntityFrameworkCore;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Services;
 using System.Collections.Concurrent;
-using System.Diagnostics.Metrics;
-using System.Numerics;
+using System.Data;
 using System.Numerics.Tensors;
-using System.Runtime.ConstrainedExecution;
 
 namespace RabbitHole.Vision.Worker.Repositories
 {
@@ -138,6 +134,8 @@ namespace RabbitHole.Vision.Worker.Repositories
             // where count is the number of recommended books to return.
             // This ensures that each cluster gets the right share in the recommendation list and correctly represents the user's taste profile.
             // If a cluster has more books it means that the user will prefer books of that type more and so that cluster should get more slots in the recommendation list.
+            // Without clusters and using just min approach, if user has 5 fantasy books and 1 mystery book and database has a lot of mystery books closely related, it would return the mystery books and not the fantasy ones
+            // since the minimum distance to the mystery books would be smaller than the minimum distance to the fantasy books.
 
             // Clustering approaches:
             // K-means algorithm: We could create clusters using the K-means clustering algorithm: We randomly select k books from the input to be the centroids of the clusters.
@@ -146,6 +144,10 @@ namespace RabbitHole.Vision.Worker.Repositories
             // If k is too small and the books are very distinct, the cluster centroid can point to very different books than those in the cluster.
             // Even if k is large and all the books are distinct, the cluster centroid can point to books that are not in the cluster.
             // So k means clustering can improve performance by reducing the number of database calls to the cluster size k, but it reduces accuracy.
+            // Clustering also helps with deduplication, for example, 5 harry potter books in the shelf only need on databse search with the centroid and 5 slots rather than
+            // 5 databse queries.
+            // Global centroid: Gives a bland middle of all the books, a median. We want niche.
+            // Clustered centroids: much better recommendations
 
             // Sequential Leader-Follower Algorithm with Running Centroid Updates: Creating clusters using a running average approach ensures that the centroid of the cluster is always representative of the books in the cluster
             // as long as the threshold for the distance centroid to the new book is kept small enough.
@@ -185,7 +187,9 @@ namespace RabbitHole.Vision.Worker.Repositories
             // Different Sub-Genres / Cross - Genre(Target: Separate)
             //      Twilight vs. Dracula(Classic Gothic Horror vs.YA Vampire Romance)
             //      Dune vs. Neuromancer(Space Opera vs.Cyberpunk)
-            var clusters = new List<Cluster>() { new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), 1) };
+            var initialCluster = new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), 1);
+            var clusters = new List<Cluster>() { initialCluster };
+            initialCluster.Books.Add(bookEmbeddings[0].Book.Title!);
 
             // Use a temporary vector to store intermediate vector results to avoid creating new 768 dimensional vectors in each iteration
             // which can be expensive in terms of memory allocation and garbage collection.
@@ -206,8 +210,11 @@ namespace RabbitHole.Vision.Worker.Repositories
                     }
                 }
 
-                // Threshold distance = 0.2 (cosine similarity = 0.8, angle = 36.9 degrees)
-                if (closestCluster != null && minDistance < 0.2) // Might need to increase this.
+                // Threshold distance = 0.22 (cosine similarity = 0.78, angle = 38.74 degrees)
+                // Reason for threshold choice: 0.23 causes slight genre bleeding where Contemporary Romance books merge with Fantasy Romance
+                // For best quality, we keep it at 22 which splits the different groups well.
+                // Lower than this would fail to group well.
+                if (closestCluster != null && minDistance < 0.22)
                 {
                     // Update the centroid to include the new book in the cluster.
                     var newSize = closestCluster.Size + 1;
@@ -215,10 +222,13 @@ namespace RabbitHole.Vision.Worker.Repositories
                     TensorPrimitives.Divide(intermediateVector, newSize, intermediateVector);
                     TensorPrimitives.Add(closestCluster.Centroid, intermediateVector, closestCluster.Centroid);
                     closestCluster.Size = newSize;
+                    closestCluster.Books.Add(bookEmbeddings[i].Book.Title!);
                 }
                 else
                 {
-                    clusters.Add(new Cluster(bookEmbeddings[i].Vector.Memory.Span.ToArray(), 1));
+                    var newCluster = new Cluster(bookEmbeddings[i].Vector.Memory.Span.ToArray(), 1);
+                    newCluster.Books.Add(bookEmbeddings[i].Book.Title!);
+                    clusters.Add(newCluster);
                 }
             }
 
@@ -232,7 +242,7 @@ namespace RabbitHole.Vision.Worker.Repositories
 
             // Fetch books from the database for each cluster.
             var books = new ConcurrentBag<(Book Book, double CentroidDistance)>();
-            var inputIsbns = bookEmbeddings.Select(be => be.Book.Isbn).ToHashSet();
+            var inputBooks = bookEmbeddings.Select(be => $"{be.Book.Title}, {be.Book.Author}").ToHashSet();
             var filteredBookCount = clusters.Sum(cluster => cluster.Size);
 
             // TODO: Add retries here.
@@ -255,7 +265,7 @@ namespace RabbitHole.Vision.Worker.Repositories
                     var clusterCentroid = new SqlVector<float>(cluster.Centroid);
                     var distances = await dbContext.Books
                                         .AsNoTracking()
-                                        .Where(book => !inputIsbns.Contains(book.Isbn))
+                                        .Where(book => !inputBooks.Contains(book.Isbn))
                                         .Select(book => new { Book = book, CentroidDistance = EF.Functions.VectorDistance("cosine", book.Embedding, clusterCentroid) })
                                         .OrderBy(book => book.CentroidDistance)
                                         .Take(slots)

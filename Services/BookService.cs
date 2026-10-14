@@ -1,4 +1,5 @@
-﻿using Google.Apis.Books.v1;
+﻿using Google;
+using Google.Apis.Books.v1;
 using Google.Apis.Books.v1.Data;
 using Google.GenAI;
 using Google.GenAI.Types;
@@ -8,6 +9,8 @@ using RabbitHole.Vision.Worker.Exceptions;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Repositories;
 using System.Collections.Concurrent;
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using static RabbitHole.Vision.Worker.Events.BooksAddedEvent;
 using Type = Google.GenAI.Types.Type;
@@ -74,7 +77,7 @@ namespace RabbitHole.Vision.Worker.Services
 
                 var bookDetails = books.Select(b => new BookDetails(b.Isbn, b.Name, null)).ToList();
                 var fetchedBookPairs = await FetchBooks(bookDetails, cancellationToken);
-                if (fetchedBookPairs == null)
+                if (fetchedBookPairs.Count == 0)
                 {
                     // None of the books could be identified.
                     return;
@@ -186,9 +189,12 @@ namespace RabbitHole.Vision.Worker.Services
                 throw new BookExtractionException();
             }
 
+            extractedBooks = extractedBooks.OrderBy(b => b.Title).ThenBy(b => b.Author).ToList();
+
             // Fetch the book details from Google Books API.
+            // TODO: Add try catch here otherwise it goes to handle error mehtod in worker?..Need retries as well.
             var booksData = await FetchBooks(extractedBooks, cancellationToken);
-            if (booksData == null || booksData.Count == 0)
+            if (booksData.Count == 0)
             {
                 throw new BookIdentificationException();
             }
@@ -225,57 +231,65 @@ namespace RabbitHole.Vision.Worker.Services
             };
         }
 
-        private async Task<List<(BookDetails Book, Volume? Volume)>?> FetchBooks(List<BookDetails> bookDetails, CancellationToken cancellationToken)
+        private async Task<List<(BookDetails Book, Volume? Volume)>> FetchBooks(List<BookDetails> bookDetails, CancellationToken cancellationToken)
         {
-            var bookRequests = new List<(BookDetails Book, VolumesResource.ListRequest Request)>();
-            foreach (var book in bookDetails)
-            {
-                if (book.Isbn != null)
-                {
-                    bookRequests.Add((book, this.googleBooks.Volumes.List($"isbn:{book.Isbn}")));
-                }
-                else if (book.Title != null)
-                {
-                    // The OCR extraction may not be perfect so we  need to be ensure that the title and author have been
-                    // extracted before querying the Google Books API.
-                    var query = book.Author != null ? $"intitle:{book.Title}+inauthor:{book.Author}" : $"intitle:{book.Title}";
-                    bookRequests.Add((book, this.googleBooks.Volumes.List(query)));
-                }
-
-                // If the book has no isbn, title or author, ignore it.
-            }
-
-            if (bookRequests.Count == 0)
-            {
-                return null;
-            }
-
             // Fetches in parallel.
             // Running too many parallel requests may result in 429 errors because of rate limiting by the Google Books API.
             // So we need to limit the number of parallel requests to avoid hitting the rate limits.
             // ConcurrentBag is a thread safe collection that allows multiple threads to add items to it concurrently without throwing exceptions.
             var result = new ConcurrentBag<(BookDetails Book, Volume? Volume)>();
             await Parallel.ForEachAsync(
-                bookRequests,
+                bookDetails,
                 new ParallelOptions 
                 { 
                     MaxDegreeOfParallelism = 4,
                     CancellationToken = cancellationToken
                 },
-                async (bookRequest, cancellationToken) =>
+                async (book, cancellationToken) =>
                 {
-                    try
+                    var maxAttempts = 3;
+                    for (var i = 1; i <= maxAttempts; i++)
                     {
-                        var response = await bookRequest.Request.ExecuteAsync(cancellationToken);
-                        var volume = response?.Items?.FirstOrDefault();
+                        try
+                        {
+                            if (book.Isbn == null && book.Title == null)
+                            {
+                                return;
+                            }
 
-                        // If the book could not be found, volume will be null.
-                        result.Add((bookRequest.Book, volume));
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        // TODO: Add retry logic and rate limiting here to handle transient errors such as network issues or rate limiting by the Google Books API.
-                        throw new BookLookupFailedException(bookRequest.Book.Isbn, bookRequest.Book.Title, ex.Message);
+                            var query = book.Isbn != null ? $"isbn:{book.Isbn}" : book.Author != null ? $"intitle:{book.Title} {book.Author}" : $"intitle:{book.Title}";
+                            var bookRequest = this.googleBooks.Volumes.List(query);
+
+                            var response = await bookRequest.ExecuteAsync(cancellationToken);
+
+                            var volume = response?.Items?.FirstOrDefault();
+
+                            if (volume == null && book.Title != null)
+                            {
+                                // Fallback to looser query
+                                query = $"{book.Title}";
+                                bookRequest = this.googleBooks.Volumes.List(query);
+                                response = await bookRequest.ExecuteAsync(cancellationToken);
+
+                                // Search by last name to avoid issues with middle names or initials in the author name.
+                                var lastName = book.Author?.Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                                volume = response?.Items?.FirstOrDefault(x => string.IsNullOrWhiteSpace(lastName) || x.VolumeInfo?.Authors?.Any(author => author.Contains(lastName, StringComparison.OrdinalIgnoreCase)) == true);
+                            }
+
+                            // If the book could not be found, volume will be null.
+                            result.Add((book, volume));
+                            return;
+                        }
+                        catch (GoogleApiException ex) when (i < maxAttempts && IsTransientFailure(ex.HttpStatusCode))
+                        {
+                            // Random.Shared() is thread safe.
+                            await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, i) + Random.Shared.NextDouble() * 2), cancellationToken);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            // TODO: Add retry logic and rate limiting here to handle transient errors such as network issues or rate limiting by the Google Books API.
+                            throw new BookLookupFailedException(book.Isbn, book.Title, ex.Message);
+                        }
                     }
                 }
             );
@@ -284,6 +298,14 @@ namespace RabbitHole.Vision.Worker.Services
             // That way we can consider the language as parameter for suggesting recommendations too.
             return result.ToList();
         }
+
+        private static bool IsTransientFailure(HttpStatusCode code) => code is HttpStatusCode.RequestTimeout 
+                or HttpStatusCode.InternalServerError 
+                or HttpStatusCode.BadGateway 
+                or HttpStatusCode.ServiceUnavailable 
+                or HttpStatusCode.GatewayTimeout 
+                or HttpStatusCode.TooManyRequests 
+                or HttpStatusCode.ServiceUnavailable;
 
         private async Task<List<(BookDetails Book, SqlVector<float>? Vector)>> CalculateEmbeddingsAsync(List<(BookDetails Book, Volume? Volume)> books, CancellationToken cancellationToken)
         {
@@ -309,13 +331,23 @@ namespace RabbitHole.Vision.Worker.Services
             var embeddingContent = new List<Content>();
             foreach (var book in books)
             {
+                var fieldCandidates = new[] { book.Volume!.VolumeInfo?.Title, book.Volume.VolumeInfo?.Subtitle, book.Volume.VolumeInfo?.Authors?.FirstOrDefault(), book.Volume.VolumeInfo?.Description };
+                var fields = new StringBuilder();
+                foreach (var candidate in fieldCandidates)
+                {
+                    if (!string.IsNullOrWhiteSpace(candidate))
+                    {
+                        fields.Append($"{candidate}. ");
+                    }
+                }
+
                 embeddingContent.Add(new Content
                 {
                     Parts =
                         [
                             new Part
                             {
-                                Text = $"Title: {book.Volume!.VolumeInfo.Title}, Subtitle: {book.Volume.VolumeInfo.Subtitle}, Series: {book.Volume.VolumeInfo.SeriesInfo}, Author: {book.Volume.VolumeInfo.Authors.FirstOrDefault()}, Genres: {string.Join(", ", book.Volume.VolumeInfo.Categories)}, Summary: {book.Volume.VolumeInfo.Description}"
+                                Text = fields.ToString().TrimEnd()
                             }
                         ]
                 });

@@ -20,6 +20,11 @@ namespace RabbitHole.Vision.Worker.Repositories
         public int Size { get; set; }
 
         /// <summary>
+        /// Gets the books.
+        /// </summary>
+        public List<string> Books { get; }
+
+        /// <summary>
         /// Initializes the cluster.
         /// </summary>
         /// <param name="centroid">The centroid of the cluster.</param>
@@ -28,6 +33,7 @@ namespace RabbitHole.Vision.Worker.Repositories
         {
             this.Centroid = centroid;
             this.Size = size;
+            this.Books = new List<string>();
         }
     }
 }
