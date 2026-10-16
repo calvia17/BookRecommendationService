@@ -29,16 +29,19 @@ namespace RabbitHole.Vision.Worker.Services
         /// <returns>The downloaded image.</returns>
         public async Task<ImageData> DownloadImageAsync(string imageUrl, CancellationToken cancellationToken = default)
         {
-            ArgumentException.ThrowIfNullOrEmpty(imageUrl);
+            if (string.IsNullOrWhiteSpace(imageUrl))
+            {
+                throw new InvalidImageException("Image URL is null or empty.");
+            }
             
             if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri))
             {
-                throw new ArgumentException($"Invalid image URL: {imageUrl}", nameof(imageUrl));
+                throw new InvalidImageException($"Invalid image URL: {imageUrl}");
             }
 
             if (!uri.Host.Equals(this.blobStorageHost, StringComparison.OrdinalIgnoreCase))
             {
-                throw new ArgumentException($"Image URL host is not a trusted storage host.", nameof(imageUrl));
+                throw new InvalidImageException($"Image URL host is not a trusted storage host.");
             }
 
             var blobUriBuilder = new BlobUriBuilder(uri);
@@ -79,7 +82,8 @@ namespace RabbitHole.Vision.Worker.Services
             }
             catch (RequestFailedException)
             {
-                throw new InvalidImageException("Failed to download image from blob storage.");
+                // TODO: Add retries, then log and throw so that azure can retry the message.
+                throw;
             }
             catch (Exception ex) when (ex is InvalidImageContentException or UnknownImageFormatException)
             {

@@ -22,6 +22,30 @@ namespace RabbitHole.Vision.Worker.Services
     /// </summary>
     public class BookService : IBookService
     {
+        private const string ocrExtractionPrompt = """
+            Extract the following details for each book from the book spines in the book shelf image.
+            - title: the title of the book (extract from the book spine)
+            - author: the author of the book (extract from the book spine)
+            - tags: up to 3 short lowercase tags (1-3 words each) describing the
+              book's genre, subgenre, themes and main tropes, most defining first (using your knowledge of the book).
+              Use common reader-recognized terms, for example "romantasy",
+              "enemies to lovers", "vampires", "domestic thriller", "grief".
+              Do not repeat the same idea in different words.
+            """;
+        private const string bookClassificationPrompt = """
+            You will receive a list of books. Each has an isbn, title and author.
+            Classify each book by populating the following fields:
+            - isbn: copied exactly from the input.
+            - title: copied exactly from the input.
+            - author: copied exactly from the input.
+            - tags: up to 3 short lowercase tags (1-3 words each) describing the
+              book's genre, subgenre, themes and main tropes, most defining first.
+              Use common reader-recognized terms, for example "romantasy",
+              "enemies to lovers", "vampires", "domestic thriller", "grief".
+              Do not repeat the same idea in different words.
+            Return one entry for every input book.
+            """;
+
         private readonly IBookRepository bookRepository;
         private readonly IBlobStorageService blobStorageService;
         private readonly Client gemini;
@@ -50,62 +74,40 @@ namespace RabbitHole.Vision.Worker.Services
         /// <returns>A task that represents the add operation.</returns>
         public async Task AddBooksAsync(IEnumerable<BooksAddedData> books, CancellationToken cancellationToken = default)
         {
-            ArgumentNullException.ThrowIfNull(books);
-
-            if (books.Any())
+            if (books == null || !books.Any())
             {
-                var isbns = new HashSet<string>();
-                var duplicates = new HashSet<string>();
-                foreach (var newBookData in books)
-                {
-                    if (!isbns.Add(newBookData.Isbn))
-                    {
-                        duplicates.Add(newBookData.Isbn);
-                    }
-                }
-                if (duplicates.Count > 0)
-                {
-                    throw new DuplicateBookInputException(duplicates);
-                }
-
-                var duplicateBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
-                if (duplicateBooks.Any())
-                {
-                    var conflicts = duplicateBooks.Select(db => new ExistingBook(db.Id, db.Isbn, db.Name)).ToList();
-                    throw new BookAlreadyExistsException(conflicts);
-                }
-
-                var bookDetails = books.Select(b => new BookDetails(b.Isbn, b.Name, null)).ToList();
-                var fetchedBookPairs = await FetchBooks(bookDetails, cancellationToken);
-                if (fetchedBookPairs.Count == 0)
-                {
-                    // None of the books could be identified.
-                    return;
-                }
-
-                var unidentifiableBooks = fetchedBookPairs.Where(b => b.Volume == null).Select(b => b.Book).ToList();
-                // Log message here to indicate that some books could not be identified and will not be added to the database.
-                // Continue to add remaining books to the database.
-
-                // TODO: check if the embedding for a book in embeddings is null and that order of embeddings matches the order of booksData.
-                // Otherwise we may need to calculate embeddings separately.
-                var identifiableBooks = fetchedBookPairs.Where(b => b.Volume != null).ToList();
-                var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
-
-                var booksToAdd = new List<Book>();
-                foreach (var (book, embedding) in bookEmbeddings)
-                {
-                    // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
-                    if (embedding.HasValue)
-                    {
-                        var bookToAdd = new Book(book.Isbn!, book.Title!, embedding.Value);
-                        booksToAdd.Add(bookToAdd);
-                    }
-                }
-
-                this.bookRepository.AddMultiple(booksToAdd);
-                await this.bookRepository.SaveChangesAsync(cancellationToken);
+                return;
             }
+
+            var isbns = books.Select(book => book.Isbn).ToHashSet();
+            var duplicateBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
+            var duplicateIsbns = duplicateBooks.Select(book => book.Isbn).ToHashSet();
+            var distinctBooks = books.Where(book => !duplicateIsbns.Contains(book.Isbn)).ToList();
+
+            var bookDetails = distinctBooks.Select(b => new UncategorisedBook(b.Isbn, b.Name, b.Author)).ToList();
+            var categorisedBooks = await CategorizeBooks(bookDetails, cancellationToken);
+
+            var fetchedBookPairs = await FetchBooks(categorisedBooks, cancellationToken);
+
+            // Log unidentified books here.
+            // Continue to add remaining books to the database.
+
+            var identifiableBooks = fetchedBookPairs.Where(b => b.Volume != null).ToList();
+            var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
+
+            var booksToAdd = new List<Book>();
+            foreach (var (book, embedding) in bookEmbeddings)
+            {
+                // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
+                if (embedding.HasValue)
+                {
+                    var bookToAdd = new Book(book.Isbn!, book.Title!, embedding.Value);
+                    booksToAdd.Add(bookToAdd);
+                }
+            }
+
+            this.bookRepository.AddMultiple(booksToAdd);
+            await this.bookRepository.SaveChangesAsync(cancellationToken);
         }
 
         /// <summary>
@@ -118,13 +120,13 @@ namespace RabbitHole.Vision.Worker.Services
         {
             if (string.IsNullOrEmpty(isbn))
             {
-                throw new ArgumentException("Invalid ISBN provided.", nameof(isbn));
+                return;
             }
 
             var books = await this.bookRepository.GetByIsbnsAsync([isbn], true, cancellationToken);
             if (!books.Any())
             {
-                throw new BookNotFoundException(isbn);
+                return;
             }
 
             this.bookRepository.Delete(books.First());
@@ -141,79 +143,46 @@ namespace RabbitHole.Vision.Worker.Services
         {
             // Dopwnload the image from blob storage.
             var image = await this.blobStorageService.DownloadImageAsync(imageUrl, cancellationToken);
-            var contents = new Content
-            {
-                Parts =
-                    [
-                        new Part
-                        {
-                            Text = "Extract the title and author name for each book from the book spines in the book shelf image."
-                        },
-                        new Part
-                        {
-                            InlineData = new Blob
-                            {
-                                MimeType = image.Type,
-                                Data = image.Data
-                            }
-                        }
-                    ]
-            };
 
-            var config = new GenerateContentConfig
-            {
-                ResponseMimeType = "application/json",
-                ResponseSchema = new Schema
-                {
-                    Type = Type.Array,
-                    Items = new Schema
-                    {
-                        Type = Type.Object,
-                        Properties = new Dictionary<string, Schema>
-                        {
-                            ["title"] = new Schema { Type = Type.String },
-                            ["author"] = new Schema { Type = Type.String }
-                        }
-                    }
-                }
-            };
-
-            // Extract the book titles and authors from the image using OCR.
-            // TODO: Add retry logic and rate limiting here.
-            var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var extractedBooks = JsonSerializer.Deserialize<List<BookDetails>>(result.Text!, options) ?? [];
-
-            if (extractedBooks.Count == 0)
-            {
-                throw new BookExtractionException();
-            }
-
+            // Extract book details from the image using OCR.
+            var extractedBooks = await ExtractBooksFromImage(image, cancellationToken);
             extractedBooks = extractedBooks.OrderBy(b => b.Title).ThenBy(b => b.Author).ToList();
 
             // Fetch the book details from Google Books API.
-            // TODO: Add try catch here otherwise it goes to handle error mehtod in worker?..Need retries as well.
             var booksData = await FetchBooks(extractedBooks, cancellationToken);
-            if (booksData.Count == 0)
-            {
-                throw new BookIdentificationException();
-            }
 
-            var unidentifiableBooks = booksData.Where(b => b.Volume == null).Select(b => b.Book).ToList();
-            // Log message here to indicate that some books could not be identified and will not be added to the database.
+            // Log unidentified books here.
+            // Continue to suggest recommendations for the identified books.
 
             // Calculate embeddings for the books.
             var identifiableBooks = booksData.Where(b => b.Volume != null).ToList();
             var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
             var successfulEmbeddings = bookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
-            if (successfulEmbeddings.Count == 0)
-            {
-                // Cannot suggest recommendations because embeddings could not be calculated for any of the extracted books.
-                // If only some embeddings could not be calculated, we can still suggest recommendations for the books that have embeddings.
-                throw new EmbeddingCalculationException();
-            }
 
             var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(successfulEmbeddings, 5, cancellationToken);
+
+            // Fetch ISBN, name, author, genre and summary for each extracted book using Google Books API.
+            // While gemini OCR is mostly reliable, small errors could occur.
+            // Google Books API has some tolerance for errors in input so small errors can still return the right expected book.
+            // So we re-fetch name and author as well so that the errors are corrected.
+
+            // Calculate embeddings for each extracted book. We could also fetch visual data from the book covers using computer vision and add this information
+            // to the embeddings. But this is not really necessary for a book recommendation system since the summary and genre are what really matter
+            // for book recommendation systems. If it was an art recommendation system, then visual data would be more important.
+
+            // Query the database for recommended books based on the embeddings. This can be done using nearest neighbour search algorithms such as
+            // Euclidean distance, manhattan distance, cosine similarity, etc.
+            // We can also use k nearest neighbour search algorithms to find the top k recommended books based on the embeddings.
+
+            // If any of the input books are in the recommendatrion results, remove them from the list.
+
+            // Consider putting a limit on the number of recommended books returned in the response to avoid overwhelming the user with too many recommendations.
+
+            // Check if caching is required for stored books so that we don't have to query the database for every recommendation request.
+
+            // Return the extracted books and recommended books in the response.
+
+            // Add retries and rate limits for external API calls to avoid hitting rate limits and to handle transient errors.
 
             return new RecommendationResultMessageDto
             {
@@ -231,13 +200,106 @@ namespace RabbitHole.Vision.Worker.Services
             };
         }
 
-        private async Task<List<(BookDetails Book, Volume? Volume)>> FetchBooks(List<BookDetails> bookDetails, CancellationToken cancellationToken)
+        private async Task<List<CategorisedBook>> ExtractBooksFromImage(ImageData image, CancellationToken cancellationToken)
+        {
+            var contents = new Content
+            {
+                Parts =
+                [
+                        new Part { Text = ocrExtractionPrompt },
+                        new Part
+                        {
+                            InlineData = new Blob
+                            {
+                                MimeType = image.Type,
+                                Data = image.Data
+                            }
+                        }
+                ]
+            };
+
+            var config = new GenerateContentConfig
+            {
+                ResponseMimeType = "application/json",
+                ResponseSchema = new Schema
+                {
+                    Type = Type.Array,
+                    Items = new Schema
+                    {
+                        Type = Type.Object,
+                        Properties = new Dictionary<string, Schema>
+                        {
+                            ["title"] = new Schema { Type = Type.String },
+                            ["author"] = new Schema { Type = Type.String },
+                            ["bookTags"] = new Schema
+                            {
+                                Type = Type.Array,
+                                Items = new Schema { Type = Type.String },
+                                MaxItems = 3
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Extract the book titles and authors from the image using OCR.
+            // TODO: Add retry logic and rate limiting here.
+            var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var extractedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
+            return extractedBooks;
+        }
+
+        private async Task<List<CategorisedBook>> CategorizeBooks(IEnumerable<UncategorisedBook> books, CancellationToken cancellationToken)
+        {
+            var contents = new Content
+            {
+                Parts =
+                [
+                    new Part { Text = bookClassificationPrompt },
+                    new Part { Text =  JsonSerializer.Serialize(books) }
+                ]
+            };
+
+            var config = new GenerateContentConfig
+            {
+                ResponseMimeType = "application/json",
+                ResponseSchema = new Schema
+                {
+                    Type = Type.Array,
+                    Items = new Schema
+                    {
+                        Type = Type.Object,
+                        Properties = new Dictionary<string, Schema>
+                        {
+                            ["isbn"] = new Schema { Type = Type.String },
+                            ["title"] = new Schema { Type = Type.String },
+                            ["author"] = new Schema { Type = Type.String },
+                            ["bookTags"] = new Schema
+                            {
+                                Type = Type.Array,
+                                Items = new Schema { Type = Type.String },
+                                MaxItems = 3
+                            }
+                        }
+                    }
+                }
+            };
+
+            // TODO: Add retry logic and rate limiting here.
+            var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var categorisedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
+            return categorisedBooks;
+        }
+
+        private async Task<List<(CategorisedBook Book, Volume? Volume)>> FetchBooks(List<CategorisedBook> bookDetails, CancellationToken cancellationToken)
         {
             // Fetches in parallel.
             // Running too many parallel requests may result in 429 errors because of rate limiting by the Google Books API.
             // So we need to limit the number of parallel requests to avoid hitting the rate limits.
             // ConcurrentBag is a thread safe collection that allows multiple threads to add items to it concurrently without throwing exceptions.
-            var result = new ConcurrentBag<(BookDetails Book, Volume? Volume)>();
+            var result = new ConcurrentBag<(CategorisedBook Book, Volume? Volume)>();
             await Parallel.ForEachAsync(
                 bookDetails,
                 new ParallelOptions 
@@ -287,8 +349,8 @@ namespace RabbitHole.Vision.Worker.Services
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
-                            // TODO: Add retry logic and rate limiting here to handle transient errors such as network issues or rate limiting by the Google Books API.
-                            throw new BookLookupFailedException(book.Isbn, book.Title, ex.Message);
+                            // Log the error here and let it throw so that Azure can retry the request.
+                            throw;
                         }
                     }
                 }
@@ -307,7 +369,7 @@ namespace RabbitHole.Vision.Worker.Services
                 or HttpStatusCode.TooManyRequests 
                 or HttpStatusCode.ServiceUnavailable;
 
-        private async Task<List<(BookDetails Book, SqlVector<float>? Vector)>> CalculateEmbeddingsAsync(List<(BookDetails Book, Volume? Volume)> books, CancellationToken cancellationToken)
+        private async Task<List<(CategorisedBook Book, SqlVector<float>? Vector)>> CalculateEmbeddingsAsync(List<(CategorisedBook Book, Volume? Volume)> books, CancellationToken cancellationToken)
         {
             // If we were running queries against the stored books in the database to allow users to find books based on a description of the kind of book they want,
             // we would use "RETRIEVAL_QUERY" as the task type for the input query embedding and "RETRIEVAL_DOCUMENT" as the task type for the stored book embeddings in the database.
@@ -331,7 +393,9 @@ namespace RabbitHole.Vision.Worker.Services
             var embeddingContent = new List<Content>();
             foreach (var book in books)
             {
-                var fieldCandidates = new[] { book.Volume!.VolumeInfo?.Title, book.Volume.VolumeInfo?.Subtitle, book.Volume.VolumeInfo?.Authors?.FirstOrDefault(), book.Volume.VolumeInfo?.Description };
+                // Use sentence structure so that the model does soft semantic weighting instead of hard keyword matching.
+                // This is because the model will understand the context of the fields better and will be able to give more weight to the important fields.
+                var fieldCandidates = new[] { book.Volume!.VolumeInfo?.Title, book.Volume.VolumeInfo?.Authors?.FirstOrDefault(), book.Volume.VolumeInfo?.Description, $"The book captures the vibe of {string.Join(", ", book.Book.BookTags)}" };
                 var fields = new StringBuilder();
                 foreach (var candidate in fieldCandidates)
                 {

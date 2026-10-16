@@ -3,7 +3,7 @@
     /// <summary>
     /// The book details.
     /// </summary>
-    public class BookDetails
+    public class UncategorisedBook
     {
         public string? Isbn { get; }
         /// <summary>
@@ -22,7 +22,7 @@
         /// <param name="isbn">The isbn.</param>
         /// <param name="title">The title.</param>
         /// <param name="author">The author.</param>
-        public BookDetails(string? isbn, string? title, string? author)
+        public UncategorisedBook(string? isbn, string? title, string? author)
         {
             this.Isbn = isbn;
             this.Title = title;

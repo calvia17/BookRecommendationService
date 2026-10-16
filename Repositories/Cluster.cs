@@ -1,4 +1,5 @@
-﻿using System;
+﻿using RabbitHole.Vision.Worker.Services;
+using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -22,18 +23,18 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <summary>
         /// Gets the books.
         /// </summary>
-        public List<string> Books { get; }
+        public List<CategorisedBook> Books { get; }
 
         /// <summary>
         /// Initializes the cluster.
         /// </summary>
         /// <param name="centroid">The centroid of the cluster.</param>
-        /// <param name="size">The size of the cluster.</param>
-        public Cluster(float[] centroid, int size)
+        /// <param name="initialBook">The initial book in the cluster.</param>
+        public Cluster(float[] centroid, CategorisedBook initialBook)
         {
             this.Centroid = centroid;
-            this.Size = size;
-            this.Books = new List<string>();
+            this.Size = 1;
+            this.Books = [initialBook];
         }
     }
 }

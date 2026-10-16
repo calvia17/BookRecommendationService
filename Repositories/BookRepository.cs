@@ -1,10 +1,16 @@
-﻿using Microsoft.Data.SqlTypes;
+﻿using Google.Apis.Books.v1.Data;
+using Google.Apis.Util;
+using Google.GenAI;
+using Microsoft.Data.SqlTypes;
 using Microsoft.EntityFrameworkCore;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Services;
 using System.Collections.Concurrent;
 using System.Data;
+using System.Diagnostics.Metrics;
+using System.Numerics;
 using System.Numerics.Tensors;
+using System.Runtime.ConstrainedExecution;
 
 namespace RabbitHole.Vision.Worker.Repositories
 {
@@ -88,7 +94,7 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <param name="numRecommendations">The number of recommended books to return.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>The recommended books.</returns>
-        public async Task<List<Book>> GetRecommendedBooksAsync(List<(BookDetails Book, SqlVector<float> Vector)> bookEmbeddings, int numRecommendations, CancellationToken cancellationToken = default)
+        public async Task<List<Book>> GetRecommendedBooksAsync(List<(CategorisedBook Book, SqlVector<float> Vector)> bookEmbeddings, int numRecommendations, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(bookEmbeddings);
 
@@ -187,9 +193,8 @@ namespace RabbitHole.Vision.Worker.Repositories
             // Different Sub-Genres / Cross - Genre(Target: Separate)
             //      Twilight vs. Dracula(Classic Gothic Horror vs.YA Vampire Romance)
             //      Dune vs. Neuromancer(Space Opera vs.Cyberpunk)
-            var initialCluster = new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), 1);
+            var initialCluster = new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), bookEmbeddings[0].Book);
             var clusters = new List<Cluster>() { initialCluster };
-            initialCluster.Books.Add(bookEmbeddings[0].Book.Title!);
 
             // Use a temporary vector to store intermediate vector results to avoid creating new 768 dimensional vectors in each iteration
             // which can be expensive in terms of memory allocation and garbage collection.
@@ -202,6 +207,8 @@ namespace RabbitHole.Vision.Worker.Repositories
                 Cluster? closestCluster = null;
                 for (var j = 0; j < clusters.Count; j++)
                 {
+                    var bookA = bookEmbeddings[i].Book.Title;
+                    var clusterBooks = string.Join(',', clusters[j].Books);
                     var distance = 1 - TensorPrimitives.CosineSimilarity(clusters[j].Centroid, bookEmbeddings[i].Vector.Memory.Span);
                     if (distance < minDistance)
                     {
@@ -214,29 +221,43 @@ namespace RabbitHole.Vision.Worker.Repositories
                 // Reason for threshold choice: 0.23 causes slight genre bleeding where Contemporary Romance books merge with Fantasy Romance
                 // For best quality, we keep it at 22 which splits the different groups well.
                 // Lower than this would fail to group well.
-                if (closestCluster != null && minDistance < 0.22)
+                if (closestCluster != null && minDistance < 0.245)
                 {
                     // Update the centroid to include the new book in the cluster.
                     var newSize = closestCluster.Size + 1;
-                    TensorPrimitives.Subtract(bookEmbeddings[i].Vector.Memory.Span, closestCluster.Centroid, intermediateVector);
-                    TensorPrimitives.Divide(intermediateVector, newSize, intermediateVector);
-                    TensorPrimitives.Add(closestCluster.Centroid, intermediateVector, closestCluster.Centroid);
+                    //TensorPrimitives.Subtract(bookEmbeddings[i].Vector.Memory.Span, closestCluster.Centroid, intermediateVector);
+                    //TensorPrimitives.Divide(intermediateVector, newSize, intermediateVector);
+                    //TensorPrimitives.Add(closestCluster.Centroid, intermediateVector, closestCluster.Centroid);
                     closestCluster.Size = newSize;
-                    closestCluster.Books.Add(bookEmbeddings[i].Book.Title!);
+                    closestCluster.Books.Add(bookEmbeddings[i].Book);
                 }
                 else
                 {
-                    var newCluster = new Cluster(bookEmbeddings[i].Vector.Memory.Span.ToArray(), 1);
-                    newCluster.Books.Add(bookEmbeddings[i].Book.Title!);
+                    var newCluster = new Cluster(bookEmbeddings[i].Vector.Memory.Span.ToArray(), bookEmbeddings[i].Book);
                     clusters.Add(newCluster);
                 }
             }
+
+            var allBooks = bookEmbeddings.Select(x => x.Book.Title + ": " + string.Join(',', x.Book.BookTags)).ToList();
+            clusters = clusters.OrderByDescending(cluster => cluster.Size).ToList();
+            var result = clusters.Select(c => string.Join(',', c.Books)).ToList();
 
             // Cluster limiting and pruning:
             if (clusters.Count > 20)
             {
                 // Remove the clusters with the least number of books.
                 clusters = clusters.OrderByDescending(c => c.Size).Take(20).ToList();
+
+                // TODO: Limit to 15 niche clusters and combining remaining into 5-7 macro clusters.
+                // This ensures we dont lose data but still improve performance for large shelves.
+                // It is unlikely for a shelf to have more than 7 major groups. We will lose the nicheness in these clusters but that is fine.
+                // Choose the 5-7 most spaced out cluster centroid and then merge the rest into them.
+
+                // TODO: Check if automatic migration in prod need to be removed for main service.
+                // Move migration to CI/CD pipeline script so it only runs when new changes pushed.
+
+                // TODO: Book seeding: Kaggle Datasets: Search Kaggle for "Goodreads 10,000 books" or "Top 1,000 Amazon Books". These usually come as clean CSV or JSON files with titles, authors, and descriptions ready to parse.
+                // Goodreads Spoilers / Book Reviews Dataset(UC San Diego): A widely used academic dataset containing rich metadata for thousands of books.
             }
 
 
@@ -285,6 +306,14 @@ namespace RabbitHole.Vision.Worker.Repositories
                                     .Take(numRecommendations) 
                                     .Select(b => b.Book)
                                     .ToList();
+
+
+            // Next steps:
+            // 2. Add retries
+            // 3. Add rate limiting
+            // 4. Future improvements:
+            //      Cache Google Books lookups by ISBN(Redis). Popular books repeat across shelves, and this call has the rate limit and latency I can’t control. This can be added later if needed.
+            //      Vector search results aren’t cached, because queries are keyed by per - shelf cluster centroids, which almost never repeat. So it would just be cache pollution.
 
             return recommendedBooks;
         }

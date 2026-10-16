@@ -62,24 +62,15 @@ namespace RabbitHole.Vision.Worker
                         await bookService.AddBooksAsync(addedEvent.AddedBooks, args.CancellationToken);
 
                     }
-                    catch (Exception ex) when (ex is ArgumentNullException || ex is DuplicateBookInputException || ex is BookAlreadyExistsException)
+                    catch (JsonException ex)
                     {
-                        await args.DeadLetterMessageAsync(args.Message, "ProcessingError", ex.Message, args.CancellationToken);
+                        await args.DeadLetterMessageAsync(args.Message, "JsonException", ex.Message, args.CancellationToken);
                         return;
                     }
                 }
                 else if (bookEvent is BookDeletedEvent deletedEvent)
                 {
-                    try
-                    {
-                        await bookService.DeleteBookAsync(deletedEvent.BookIsbn, args.CancellationToken);
-
-                    }
-                    catch (Exception ex) when (ex is ArgumentException || ex is BookNotFoundException)
-                    {
-                        await args.DeadLetterMessageAsync(args.Message, "ProcessingError", ex.Message, args.CancellationToken);
-                        return;
-                    }
+                    await bookService.DeleteBookAsync(deletedEvent.BookIsbn, args.CancellationToken);
                 }
                 else if (bookEvent is RecommendationsRequestedEvent recommendationsRequestEvent)
                 {

@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace RabbitHole.Vision.Worker.Exceptions
+﻿namespace RabbitHole.Vision.Worker.Exceptions
 {
     /// <summary>
     /// The invalid image exception.

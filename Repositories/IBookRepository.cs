@@ -44,7 +44,7 @@ namespace RabbitHole.Vision.Worker.Repositories
         /// <param name="count">The number of recommended books to return.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>The recommended books.</returns>
-        Task<List<Book>> GetRecommendedBooksAsync(List<(BookDetails Book, SqlVector<float> Vector)> bookEmbeddings, int count, CancellationToken cancellationToken = default);
+        Task<List<Book>> GetRecommendedBooksAsync(List<(CategorisedBook Book, SqlVector<float> Vector)> bookEmbeddings, int count, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Saves the changes.

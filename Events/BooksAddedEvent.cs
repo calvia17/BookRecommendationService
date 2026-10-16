@@ -17,8 +17,8 @@ namespace RabbitHole.Vision.Worker.Events
         /// </summary>
         /// <param name="Isbn">The isbn.</param>
         /// <param name="Name">The name.</param>
-        /// <param name="Genres">The genres.</param>
-        public record BooksAddedData(string Isbn, string Name, List<GenreType> Genres);
+        /// <param name="Author">The author.</param>
+        public record BooksAddedData(string Isbn, string Name, string Author);
 
         /// <summary>
         /// Initializes the book added event.
