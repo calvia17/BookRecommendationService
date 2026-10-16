@@ -1,4 +1,5 @@
-﻿using RabbitHole.Vision.Worker.Services;
+﻿using RabbitHole.Vision.Worker.Objects;
+using RabbitHole.Vision.Worker.Services;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -21,6 +22,16 @@ namespace RabbitHole.Vision.Worker.Repositories
         public int Size { get; set; }
 
         /// <summary>
+        /// Gets the book type.
+        /// </summary>
+        public BookType BookType { get; set; }
+
+        /// <summary>
+        /// Gets the genre group.
+        /// </summary>
+        public GenreGroup GenreGroup { get; set; }
+
+        /// <summary>
         /// Gets the books.
         /// </summary>
         public List<CategorisedBook> Books { get; }
@@ -35,6 +46,8 @@ namespace RabbitHole.Vision.Worker.Repositories
             this.Centroid = centroid;
             this.Size = 1;
             this.Books = [initialBook];
+            this.BookType = initialBook.BookType;
+            this.GenreGroup = initialBook.GenreGroup;
         }
     }
 }

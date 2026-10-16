@@ -23,7 +23,22 @@ namespace RabbitHole.Vision.Worker.Objects
         /// <summary>
         /// Gets the name.
         /// </summary>
-        public string Name { get; set; }
+        public string Name { get; }
+
+        /// <summary>
+        /// Gets the author.
+        /// </summary>
+        public string Author { get; }
+
+        /// <summary>
+        /// Gets or sets the type of the book.
+        /// </summary>
+        public BookType BookType { get; }
+
+        /// <summary>
+        /// Gets or sets the genre group.
+        /// </summary>
+        public GenreGroup GenreGroup { get; }
 
         /// <summary>
         /// Gets the embedding.
@@ -37,11 +52,17 @@ namespace RabbitHole.Vision.Worker.Objects
         /// <param name="id">The id.</param>
         /// <param name="isbn">The isbn.</param>
         /// <param name="name">The name.</param>
+        /// <param name="author">The author.</param>
+        /// <param name="bookType">The type of the book.</param>
+        /// <param name="genreGroup">The genre group.</param>
         /// <param name="embedding">The embedding.</param>
-        public Book(string isbn, string name, SqlVector<float> embedding)
+        public Book(string isbn, string name, string author, BookType bookType, GenreGroup genreGroup, SqlVector<float> embedding)
         {
             this.Isbn = isbn;
             this.Name = name;
+            this.Author = author;
+            this.BookType = bookType;
+            this.GenreGroup = genreGroup;
             this.Embedding = embedding;
         }
     }

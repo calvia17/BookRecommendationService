@@ -5,13 +5,13 @@ using Google.GenAI;
 using Google.GenAI.Types;
 using Microsoft.Data.SqlTypes;
 using RabbitHole.Vision.Worker.Dtos;
-using RabbitHole.Vision.Worker.Exceptions;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Repositories;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using static RabbitHole.Vision.Worker.Events.BooksAddedEvent;
 using Type = Google.GenAI.Types.Type;
 
@@ -26,6 +26,8 @@ namespace RabbitHole.Vision.Worker.Services
             Extract the following details for each book from the book spines in the book shelf image.
             - title: the title of the book (extract from the book spine)
             - author: the author of the book (extract from the book spine)
+            - bookType: Choose the type of the book from the provided list.
+            - genreGroup: Choose the genre group of the book from the provided list. If there are multiple genre groups, choose the one that describes the book the best.
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first (using your knowledge of the book).
               Use common reader-recognized terms, for example "romantasy",
@@ -38,12 +40,13 @@ namespace RabbitHole.Vision.Worker.Services
             - isbn: copied exactly from the input.
             - title: copied exactly from the input.
             - author: copied exactly from the input.
+            - bookType: the type of the book (from the provided BookType enum options)
+            - genreGroup: the genre group of the book (from the provided GenreGroup enum options)
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first.
               Use common reader-recognized terms, for example "romantasy",
               "enemies to lovers", "vampires", "domestic thriller", "grief".
               Do not repeat the same idea in different words.
-            Return one entry for every input book.
             """;
 
         private readonly IBookRepository bookRepository;
@@ -101,7 +104,7 @@ namespace RabbitHole.Vision.Worker.Services
                 // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
                 if (embedding.HasValue)
                 {
-                    var bookToAdd = new Book(book.Isbn!, book.Title!, embedding.Value);
+                    var bookToAdd = new Book(book.Isbn!, book.Title!, book.Author!, book.BookType, book.GenreGroup, embedding.Value);
                     booksToAdd.Add(bookToAdd);
                 }
             }
@@ -231,6 +234,8 @@ namespace RabbitHole.Vision.Worker.Services
                         {
                             ["title"] = new Schema { Type = Type.String },
                             ["author"] = new Schema { Type = Type.String },
+                            ["bookType"] = new Schema { Type = Type.String, Format = "enum", Enum = Enum.GetNames(typeof(BookType)).ToList() },
+                            ["genreGroup"] = new Schema { Type = Type.String, Format = "enum", Enum = Enum.GetNames(typeof(GenreGroup)).ToList() },
                             ["bookTags"] = new Schema
                             {
                                 Type = Type.Array,
@@ -245,7 +250,11 @@ namespace RabbitHole.Vision.Worker.Services
             // Extract the book titles and authors from the image using OCR.
             // TODO: Add retry logic and rate limiting here.
             var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                Converters = { new JsonStringEnumConverter() }
+            };
             var extractedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
             return extractedBooks;
         }
@@ -275,6 +284,8 @@ namespace RabbitHole.Vision.Worker.Services
                             ["isbn"] = new Schema { Type = Type.String },
                             ["title"] = new Schema { Type = Type.String },
                             ["author"] = new Schema { Type = Type.String },
+                            ["bookType"] = new Schema { Type = Type.String, Format = "enum", Enum = Enum.GetNames(typeof(BookType)).ToList() },
+                            ["genreGroup"] = new Schema { Type = Type.String, Format = "enum", Enum = Enum.GetNames(typeof(GenreGroup)).ToList() },
                             ["bookTags"] = new Schema
                             {
                                 Type = Type.Array,
@@ -288,7 +299,11 @@ namespace RabbitHole.Vision.Worker.Services
 
             // TODO: Add retry logic and rate limiting here.
             var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                Converters = { new JsonStringEnumConverter() }
+            };
             var categorisedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
             return categorisedBooks;
         }

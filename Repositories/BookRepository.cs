@@ -193,6 +193,7 @@ namespace RabbitHole.Vision.Worker.Repositories
             // Different Sub-Genres / Cross - Genre(Target: Separate)
             //      Twilight vs. Dracula(Classic Gothic Horror vs.YA Vampire Romance)
             //      Dune vs. Neuromancer(Space Opera vs.Cyberpunk)
+            bookEmbeddings = bookEmbeddings.DistinctBy(x => x.Book.Title).ToList();
             var initialCluster = new Cluster(bookEmbeddings[0].Vector.Memory.Span.ToArray(), bookEmbeddings[0].Book);
             var clusters = new List<Cluster>() { initialCluster };
 
@@ -210,7 +211,13 @@ namespace RabbitHole.Vision.Worker.Repositories
                     var bookA = bookEmbeddings[i].Book.Title;
                     var clusterBooks = string.Join(',', clusters[j].Books);
                     var distance = 1 - TensorPrimitives.CosineSimilarity(clusters[j].Centroid, bookEmbeddings[i].Vector.Memory.Span);
-                    if (distance < minDistance)
+
+                    // We need to filter by book type and broad genre group to ensure that books across genre groups/different book types are not clustered together
+                    // even if they have similar themes. The embedding vectors can be similar for books with different genre/book type if they have similar themes so we need to filter them.
+                    // The recommendations and clustering need to identify themes within the same genre group and book type only.
+                    if (distance < minDistance
+                        && clusters[j].BookType == bookEmbeddings[i].Book.BookType 
+                        && clusters[j].GenreGroup == bookEmbeddings[i].Book.GenreGroup)
                     {
                         closestCluster = clusters[j];
                         minDistance = distance;
@@ -221,13 +228,10 @@ namespace RabbitHole.Vision.Worker.Repositories
                 // Reason for threshold choice: 0.23 causes slight genre bleeding where Contemporary Romance books merge with Fantasy Romance
                 // For best quality, we keep it at 22 which splits the different groups well.
                 // Lower than this would fail to group well.
-                if (closestCluster != null && minDistance < 0.245)
+                if (closestCluster != null && minDistance < 0.25)
                 {
                     // Update the centroid to include the new book in the cluster.
                     var newSize = closestCluster.Size + 1;
-                    //TensorPrimitives.Subtract(bookEmbeddings[i].Vector.Memory.Span, closestCluster.Centroid, intermediateVector);
-                    //TensorPrimitives.Divide(intermediateVector, newSize, intermediateVector);
-                    //TensorPrimitives.Add(closestCluster.Centroid, intermediateVector, closestCluster.Centroid);
                     closestCluster.Size = newSize;
                     closestCluster.Books.Add(bookEmbeddings[i].Book);
                 }
@@ -238,28 +242,12 @@ namespace RabbitHole.Vision.Worker.Repositories
                 }
             }
 
-            var allBooks = bookEmbeddings.Select(x => x.Book.Title + ": " + string.Join(',', x.Book.BookTags)).ToList();
-            clusters = clusters.OrderByDescending(cluster => cluster.Size).ToList();
-            var result = clusters.Select(c => string.Join(',', c.Books)).ToList();
+            // var allBooks = bookEmbeddings.Select(x => x.Book.Title + ": " + string.Join(',', x.Book.BookTags)).ToList();
 
-            // Cluster limiting and pruning:
-            if (clusters.Count > 20)
-            {
-                // Remove the clusters with the least number of books.
-                clusters = clusters.OrderByDescending(c => c.Size).Take(20).ToList();
-
-                // TODO: Limit to 15 niche clusters and combining remaining into 5-7 macro clusters.
-                // This ensures we dont lose data but still improve performance for large shelves.
-                // It is unlikely for a shelf to have more than 7 major groups. We will lose the nicheness in these clusters but that is fine.
-                // Choose the 5-7 most spaced out cluster centroid and then merge the rest into them.
-
-                // TODO: Check if automatic migration in prod need to be removed for main service.
-                // Move migration to CI/CD pipeline script so it only runs when new changes pushed.
-
-                // TODO: Book seeding: Kaggle Datasets: Search Kaggle for "Goodreads 10,000 books" or "Top 1,000 Amazon Books". These usually come as clean CSV or JSON files with titles, authors, and descriptions ready to parse.
-                // Goodreads Spoilers / Book Reviews Dataset(UC San Diego): A widely used academic dataset containing rich metadata for thousands of books.
-            }
-
+            // Sort clusters by size and take the top 7 clusters.
+            // This ensures that we are only considering the most significant clusters for recommendations.
+            var result = clusters.OrderByDescending(cluster => cluster.Size).Select(c => string.Join(',', c.Books.Select(x => x.Title).ToList())).ToList();
+            clusters = clusters.OrderByDescending(cluster => cluster.Size).Take(7).ToList();
 
             // Fetch books from the database for each cluster.
             var books = new ConcurrentBag<(Book Book, double CentroidDistance)>();
@@ -286,7 +274,7 @@ namespace RabbitHole.Vision.Worker.Repositories
                     var clusterCentroid = new SqlVector<float>(cluster.Centroid);
                     var distances = await dbContext.Books
                                         .AsNoTracking()
-                                        .Where(book => !inputBooks.Contains(book.Isbn))
+                                        .Where(book => !inputBooks.Contains(book.Isbn) && book.BookType == cluster.BookType && book.GenreGroup == cluster.GenreGroup)
                                         .Select(book => new { Book = book, CentroidDistance = EF.Functions.VectorDistance("cosine", book.Embedding, clusterCentroid) })
                                         .OrderBy(book => book.CentroidDistance)
                                         .Take(slots)
