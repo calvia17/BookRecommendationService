@@ -30,6 +30,10 @@ namespace RabbitHole.Vision.Worker
             modelBuilder.Entity<Book>().Property(b => b.Isbn).HasMaxLength(13).IsRequired();
             modelBuilder.Entity<Book>().HasIndex(b => b.Isbn).IsUnique().HasDatabaseName("Books_Isbn");
             modelBuilder.Entity<Book>().Property(b => b.Name).HasMaxLength(250).IsRequired();
+            modelBuilder.Entity<Book>().Property(b => b.Author).HasMaxLength(200).IsRequired();
+            modelBuilder.Entity<Book>().HasIndex(b => new { b.Name, b.Author }).HasDatabaseName("Books_Author");
+            modelBuilder.Entity<Book>().Property(b => b.BookType).IsRequired();
+            modelBuilder.Entity<Book>().Property(b => b.GenreGroup).IsRequired();
             modelBuilder.Entity<Book>().Property(b => b.Embedding).IsRequired();
         }
     }

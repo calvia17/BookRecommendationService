@@ -68,6 +68,23 @@ namespace RabbitHole.Vision.Worker
                         return;
                     }
                 }
+                else if (bookEvent is BooksUpdatedEvent updatedEvent)
+                {
+                    try
+                    {
+                        // This will just add the books that dont already exist.
+                        // When the books were originally added, the add wouldn't have passed if the book title and author name
+                        // were not valid (small typos would be fixed by the Google Books API).
+                        // So we just need to add the ones that don't exist.
+                        await bookService.AddBooksAsync(updatedEvent.UpdatedBooks, args.CancellationToken);
+
+                    }
+                    catch (JsonException ex)
+                    {
+                        await args.DeadLetterMessageAsync(args.Message, "JsonException", ex.Message, args.CancellationToken);
+                        return;
+                    }
+                }
                 else if (bookEvent is BookDeletedEvent deletedEvent)
                 {
                     await bookService.DeleteBookAsync(deletedEvent.BookIsbn, args.CancellationToken);

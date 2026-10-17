@@ -19,12 +19,20 @@ namespace RabbitHole.Vision.Worker.Migrations
                     Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     Isbn = table.Column<string>(type: "nvarchar(13)", maxLength: 13, nullable: false),
                     Name = table.Column<string>(type: "nvarchar(250)", maxLength: 250, nullable: false),
+                    Author = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    BookType = table.Column<int>(type: "int", nullable: false),
+                    GenreGroup = table.Column<int>(type: "int", nullable: false),
                     Embedding = table.Column<SqlVector<float>>(type: "vector(768)", nullable: false)
                 },
                 constraints: table =>
                 {
                     table.PrimaryKey("PK_Books", x => x.Id);
                 });
+
+            migrationBuilder.CreateIndex(
+                name: "Books_Author",
+                table: "Books",
+                columns: new[] { "Name", "Author" });
 
             migrationBuilder.CreateIndex(
                 name: "Books_Isbn",

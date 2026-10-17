@@ -247,7 +247,7 @@ namespace RabbitHole.Vision.Worker.Repositories
             // Sort clusters by size and take the top 7 clusters.
             // This ensures that we are only considering the most significant clusters for recommendations.
             var result = clusters.OrderByDescending(cluster => cluster.Size).Select(c => string.Join(',', c.Books.Select(x => x.Title).ToList())).ToList();
-            clusters = clusters.OrderByDescending(cluster => cluster.Size).Take(7).ToList();
+            clusters = clusters.OrderByDescending(cluster => cluster.Size).Take(20).ToList();
 
             // Fetch books from the database for each cluster.
             var books = new ConcurrentBag<(Book Book, double CentroidDistance)>();
@@ -297,11 +297,14 @@ namespace RabbitHole.Vision.Worker.Repositories
 
 
             // Next steps:
-            // 2. Add retries
-            // 3. Add rate limiting
-            // 4. Future improvements:
-            //      Cache Google Books lookups by ISBN(Redis). Popular books repeat across shelves, and this call has the rate limit and latency I can’t control. This can be added later if needed.
-            //      Vector search results aren’t cached, because queries are keyed by per - shelf cluster centroids, which almost never repeat. So it would just be cache pollution.
+            // 1. Seed database with books and test recommendations.
+            // 2. Add update event and check if book already in databse, if not add. No need to try updating databse because we fetch title and author name from google books
+            //      so the initial add either failed or entered correct values.
+            //      So we just need to add again if not in database.
+            // 3. Cache stored book embeddings by ISBN. Search from cache for shelf books first and only if not found, use apis.
+            // 4. Add retries
+            // 5. Add rate limiting
+            // NOTE: Recommendation results aren’t cached, because queries are keyed by per - shelf cluster centroids, which almost never repeat. So it would just be cache pollution.
 
             return recommendedBooks;
         }

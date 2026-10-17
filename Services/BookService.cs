@@ -12,7 +12,6 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using static RabbitHole.Vision.Worker.Events.BooksAddedEvent;
 using Type = Google.GenAI.Types.Type;
 
 namespace RabbitHole.Vision.Worker.Services
@@ -75,19 +74,19 @@ namespace RabbitHole.Vision.Worker.Services
         /// <param name="books">The books to add.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task that represents the add operation.</returns>
-        public async Task AddBooksAsync(IEnumerable<BooksAddedData> books, CancellationToken cancellationToken = default)
+        public async Task AddBooksAsync(IEnumerable<BookDetails> books, CancellationToken cancellationToken = default)
         {
             if (books == null || !books.Any())
             {
                 return;
             }
 
-            var isbns = books.Select(book => book.Isbn).ToHashSet();
-            var duplicateBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
-            var duplicateIsbns = duplicateBooks.Select(book => book.Isbn).ToHashSet();
-            var distinctBooks = books.Where(book => !duplicateIsbns.Contains(book.Isbn)).ToList();
+            var isbns = books.Select(book => book.Isbn!).ToHashSet();
+            var existingBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
+            var existingIsbns = existingBooks.Select(book => book.Isbn).ToHashSet();
+            var newBooks = books.Where(book => !existingIsbns.Contains(book.Isbn!)).ToList();
 
-            var bookDetails = distinctBooks.Select(b => new UncategorisedBook(b.Isbn, b.Name, b.Author)).ToList();
+            var bookDetails = newBooks.Select(b => new BookDetails(b.Isbn, b.Title, b.Author)).ToList();
             var categorisedBooks = await CategorizeBooks(bookDetails, cancellationToken);
 
             var fetchedBookPairs = await FetchBooks(categorisedBooks, cancellationToken);
@@ -259,7 +258,7 @@ namespace RabbitHole.Vision.Worker.Services
             return extractedBooks;
         }
 
-        private async Task<List<CategorisedBook>> CategorizeBooks(IEnumerable<UncategorisedBook> books, CancellationToken cancellationToken)
+        private async Task<List<CategorisedBook>> CategorizeBooks(IEnumerable<BookDetails> books, CancellationToken cancellationToken)
         {
             var contents = new Content
             {
@@ -353,7 +352,8 @@ namespace RabbitHole.Vision.Worker.Services
                                 volume = response?.Items?.FirstOrDefault(x => string.IsNullOrWhiteSpace(lastName) || x.VolumeInfo?.Authors?.Any(author => author.Contains(lastName, StringComparison.OrdinalIgnoreCase)) == true);
                             }
 
-                            // If the book could not be found, volume will be null.
+                            book.Title = volume?.VolumeInfo?.Title ?? book.Title;
+                            book.Author = volume?.VolumeInfo?.Authors?.FirstOrDefault() ?? book.Author;
                             result.Add((book, volume));
                             return;
                         }

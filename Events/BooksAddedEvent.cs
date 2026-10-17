@@ -1,4 +1,4 @@
-﻿using RabbitHole.Vision.Worker.Objects;
+﻿using RabbitHole.Vision.Worker.Services;
 
 namespace RabbitHole.Vision.Worker.Events
 {
@@ -10,21 +10,13 @@ namespace RabbitHole.Vision.Worker.Events
         /// <summary>
         /// The added books.
         /// </summary>
-        public List<BooksAddedData> AddedBooks { get; }
-
-        /// <summary>
-        /// The book record.
-        /// </summary>
-        /// <param name="Isbn">The isbn.</param>
-        /// <param name="Name">The name.</param>
-        /// <param name="Author">The author.</param>
-        public record BooksAddedData(string Isbn, string Name, string Author);
+        public List<BookDetails> AddedBooks { get; }
 
         /// <summary>
         /// Initializes the book added event.
         /// </summary>
         /// <param name="addedBooks">The added books.</param>
-        public BooksAddedEvent(List<BooksAddedData> addedBooks)
+        public BooksAddedEvent(List<BookDetails> addedBooks)
         {
             this.AddedBooks = addedBooks;
         }

@@ -5,7 +5,7 @@ namespace RabbitHole.Vision.Worker.Services
     /// <summary>
     /// The classified shelf book.
     /// </summary>
-    public class CategorisedBook : UncategorisedBook
+    public class CategorisedBook : BookDetails
     {
         /// <summary>
         /// Gets the book type.

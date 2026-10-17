@@ -13,7 +13,7 @@ using RabbitHole.Vision.Worker;
 namespace RabbitHole.Vision.Worker.Migrations
 {
     [DbContext(typeof(BookStoreContext))]
-    [Migration("20260919014953_InitialMigration")]
+    [Migration("20261017064146_InitialMigration")]
     partial class InitialMigration
     {
         /// <inheritdoc />
@@ -32,8 +32,19 @@ namespace RabbitHole.Vision.Worker.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("Author")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("BookType")
+                        .HasColumnType("int");
+
                     b.Property<SqlVector<float>>("Embedding")
                         .HasColumnType("vector(768)");
+
+                    b.Property<int>("GenreGroup")
+                        .HasColumnType("int");
 
                     b.Property<string>("Isbn")
                         .IsRequired()
@@ -50,6 +61,9 @@ namespace RabbitHole.Vision.Worker.Migrations
                     b.HasIndex("Isbn")
                         .IsUnique()
                         .HasDatabaseName("Books_Isbn");
+
+                    b.HasIndex("Name", "Author")
+                        .HasDatabaseName("Books_Author");
 
                     b.ToTable("Books");
                 });

@@ -3,18 +3,18 @@
     /// <summary>
     /// The book details.
     /// </summary>
-    public class UncategorisedBook
+    public class BookDetails
     {
         public string? Isbn { get; }
         /// <summary>
         /// The title.
         /// </summary>
-        public string? Title { get; }
+        public string? Title { get; set; }
 
         /// <summary>
         /// The author.
         /// </summary>
-        public string? Author { get; }
+        public string? Author { get; set; }
 
         /// <summary>
         /// Initializes the extracted book details.
@@ -22,7 +22,7 @@
         /// <param name="isbn">The isbn.</param>
         /// <param name="title">The title.</param>
         /// <param name="author">The author.</param>
-        public UncategorisedBook(string? isbn, string? title, string? author)
+        public BookDetails(string? isbn, string? title, string? author)
         {
             this.Isbn = isbn;
             this.Title = title;

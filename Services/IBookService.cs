@@ -1,5 +1,4 @@
 ﻿using RabbitHole.Vision.Worker.Dtos;
-using static RabbitHole.Vision.Worker.Events.BooksAddedEvent;
 
 namespace RabbitHole.Vision.Worker.Services
 {
@@ -14,7 +13,7 @@ namespace RabbitHole.Vision.Worker.Services
         /// <param name="books">The books to add.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task that represents the add operation.</returns>
-        Task AddBooksAsync(IEnumerable<BooksAddedData> books, CancellationToken cancellationToken = default);
+        Task AddBooksAsync(IEnumerable<BookDetails> books, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Deletes the book.
