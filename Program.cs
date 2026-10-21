@@ -44,9 +44,16 @@ builder.Services.AddSingleton(new BooksService(new BaseClientService.Initializer
     ApplicationName = "BookRecommender"
 }));
 
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis");
+    options.InstanceName = "worker:distributed";
+});
+
 builder.Services.AddHostedService<Worker>();
 builder.Services.AddScoped<IBookService, BookService>();
 builder.Services.AddScoped<IBookRepository, BookRepository>();
+builder.Services.AddScoped<ICachedBookDetailsProvider, CachedBookDetailsProvider>();
 builder.Services.AddScoped<IBlobStorageService>(sp => new BlobStorageService(sp.GetRequiredService<BlobContainerClient>(), blobStorageHost!));
 
 var host = builder.Build();

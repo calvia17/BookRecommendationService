@@ -46,10 +46,12 @@ namespace RabbitHole.Vision.Worker.Services
               Use common reader-recognized terms, for example "romantasy",
               "enemies to lovers", "vampires", "domestic thriller", "grief".
               Do not repeat the same idea in different words.
+            If you cannot identify and tag the books, leave the tags as unknown. Do not make up information.
             """;
 
         private readonly IBookRepository bookRepository;
         private readonly IBlobStorageService blobStorageService;
+        private readonly ICachedBookDetailsProvider cachedBookEmbeddingsProvider;
         private readonly Client gemini;
         private readonly BooksService googleBooks;
 
@@ -60,12 +62,14 @@ namespace RabbitHole.Vision.Worker.Services
         /// <param name="blobStorageService">The blob storage service.</param>
         /// <param name="gemini">The gemini client.</param>
         /// <param name="googleBooks">The google books service.</param>
-        public BookService(IBookRepository bookRepository, IBlobStorageService blobStorageService, Client gemini, BooksService googleBooks)
+        /// <param name="cachedBookEmbeddingsProvider">The cached book embeddings provider.</param>
+        public BookService(IBookRepository bookRepository, IBlobStorageService blobStorageService, ICachedBookDetailsProvider cachedBookEmbeddingsProvider, Client gemini, BooksService googleBooks)
         {
             this.bookRepository = bookRepository;
             this.blobStorageService = blobStorageService;
             this.gemini = gemini;
             this.googleBooks = googleBooks;
+            this.cachedBookEmbeddingsProvider = cachedBookEmbeddingsProvider;
         }
 
         /// <summary>
@@ -85,10 +89,26 @@ namespace RabbitHole.Vision.Worker.Services
             var existingBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
             var existingIsbns = existingBooks.Select(book => book.Isbn).ToHashSet();
             var newBooks = books.Where(book => !existingIsbns.Contains(book.Isbn!)).ToList();
+            var booksToAdd = new List<Book>();
+            var uncachedBooks = new List<BookDetails>();
 
-            var bookDetails = newBooks.Select(b => new BookDetails(b.Isbn, b.Title, b.Author)).ToList();
-            var categorisedBooks = await CategorizeBooks(bookDetails, cancellationToken);
+            // Fetch embeddings from cache since earlier shelf lookups maybe have generated embeddings for these new books already.
+            foreach (var book in newBooks)
+            {
+                var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
+                if (cachedBook.HasValue)
+                {
+                    var bookToAdd = new Book(book.Isbn!, cachedBook.Value.Book.Title!, cachedBook.Value.Book.Author!, cachedBook.Value.Book.BookType, cachedBook.Value.Book.GenreGroup, cachedBook.Value.Embedding);
+                    booksToAdd.Add(bookToAdd);
+                }
+                else
+                {
+                    uncachedBooks.Add(book);
+                }
+            }
 
+            // Categorize and compute embeddings for uncached books.
+            var categorisedBooks = await CategorizeBooks(uncachedBooks, cancellationToken);
             var fetchedBookPairs = await FetchBooks(categorisedBooks, cancellationToken);
 
             // Log unidentified books here.
@@ -97,7 +117,6 @@ namespace RabbitHole.Vision.Worker.Services
             var identifiableBooks = fetchedBookPairs.Where(b => b.Volume != null).ToList();
             var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
 
-            var booksToAdd = new List<Book>();
             foreach (var (book, embedding) in bookEmbeddings)
             {
                 // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
@@ -105,6 +124,7 @@ namespace RabbitHole.Vision.Worker.Services
                 {
                     var bookToAdd = new Book(book.Isbn!, book.Title!, book.Author!, book.BookType, book.GenreGroup, embedding.Value);
                     booksToAdd.Add(bookToAdd);
+                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(book, embedding.Value, cancellationToken);
                 }
             }
 
@@ -150,18 +170,40 @@ namespace RabbitHole.Vision.Worker.Services
             var extractedBooks = await ExtractBooksFromImage(image, cancellationToken);
             extractedBooks = extractedBooks.OrderBy(b => b.Title).ThenBy(b => b.Author).ToList();
 
+            // Fetch books embeddings that are in the cache.
+            var bookEmbeddings = new List<(CategorisedBook Book, SqlVector<float> Vector)>();
+            var uncachedBooks = new List<CategorisedBook>();
+            foreach (var book in extractedBooks)
+            {
+                var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
+                if (cachedBook.HasValue)
+                {
+                    bookEmbeddings.Add((book, cachedBook.Value.Embedding));
+                }
+                else
+                {
+                    uncachedBooks.Add(book);
+                }
+            }
+
             // Fetch the book details from Google Books API.
-            var booksData = await FetchBooks(extractedBooks, cancellationToken);
+            var booksData = await FetchBooks(uncachedBooks, cancellationToken);
 
             // Log unidentified books here.
             // Continue to suggest recommendations for the identified books.
 
             // Calculate embeddings for the books.
             var identifiableBooks = booksData.Where(b => b.Volume != null).ToList();
-            var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
-            var successfulEmbeddings = bookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
+            var newBookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
+            var successfulEmbeddings = newBookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
 
-            var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(successfulEmbeddings, 5, cancellationToken);
+            foreach (var bookEmbedding in successfulEmbeddings)
+            {
+                await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+            }
+
+            bookEmbeddings.AddRange(successfulEmbeddings);
+            var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(bookEmbeddings, 5, cancellationToken);
 
             // Fetch ISBN, name, author, genre and summary for each extracted book using Google Books API.
             // While gemini OCR is mostly reliable, small errors could occur.
@@ -260,6 +302,11 @@ namespace RabbitHole.Vision.Worker.Services
 
         private async Task<List<CategorisedBook>> CategorizeBooks(IEnumerable<BookDetails> books, CancellationToken cancellationToken)
         {
+            if (!books.Any())
+            {
+                return [];
+            }
+
             var contents = new Content
             {
                 Parts =
@@ -386,6 +433,11 @@ namespace RabbitHole.Vision.Worker.Services
 
         private async Task<List<(CategorisedBook Book, SqlVector<float>? Vector)>> CalculateEmbeddingsAsync(List<(CategorisedBook Book, Volume? Volume)> books, CancellationToken cancellationToken)
         {
+            if (books.Count == 0)
+            {
+                return [];
+            }
+
             // If we were running queries against the stored books in the database to allow users to find books based on a description of the kind of book they want,
             // we would use "RETRIEVAL_QUERY" as the task type for the input query embedding and "RETRIEVAL_DOCUMENT" as the task type for the stored book embeddings in the database.
             // This would do an asymmetrical search where the input query embedding is used to find the most similar stored book embeddings in the database.
