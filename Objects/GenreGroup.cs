@@ -10,9 +10,8 @@
     {
         Unknown = 0,
         Romance = 1,
-        ScienceFiction = 2,
+        ScienceFictionFantasy = 2,
         Suspense = 3,
-        OtherFiction = 4,
-        NonFiction = 5
+        Other = 4
     }
 }

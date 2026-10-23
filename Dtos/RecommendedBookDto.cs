@@ -1,9 +1,9 @@
 ﻿namespace RabbitHole.Vision.Worker.Dtos
 {
     /// <summary>
-    /// The book message dto.
+    /// The recommended book dto.
     /// </summary>
-    public class BookMessageDto
+    public class RecommendedBookDto
     {
         /// <summary>
         /// Gets the isbn.

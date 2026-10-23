@@ -27,6 +27,9 @@ namespace RabbitHole.Vision.Worker.Services
             - author: the author of the book (extract from the book spine)
             - bookType: Choose the type of the book from the provided list.
             - genreGroup: Choose the genre group of the book from the provided list. If there are multiple genre groups, choose the one that describes the book the best.
+            - Use genreGroup 'Romance' if the romantic relationship is the main plotline, or the book is marketed as romance or romantasy. This applies to any setting (fantasy, historical, contemporary, etc.). Check this first.
+            - Use genreGroup 'ScienceFictionFantasy' if the book is science fiction or fantasy where romance is a side element or absent.
+            - Avoid using Unknown or OtherFiction unless it is absolutely not possible to classify into any of the other categories. 
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first (using your knowledge of the book).
               Use common reader-recognized terms, for example "romantasy",
@@ -41,6 +44,9 @@ namespace RabbitHole.Vision.Worker.Services
             - author: copied exactly from the input.
             - bookType: the type of the book (from the provided BookType enum options)
             - genreGroup: the genre group of the book (from the provided GenreGroup enum options)
+            - Use genreGroup 'Romance' if the romantic relationship is the main plotline, or the book is marketed as romance or romantasy. This applies to any setting (fantasy, historical, contemporary, etc.). Check this first.
+            - Use genreGroup 'ScienceFictionFantasy' if the book is science fiction or fantasy where romance is a side element or absent.
+            - Avoid using Unknown or OtherFiction unless it is absolutely not possible to classify into any of the other categories. 
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first.
               Use common reader-recognized terms, for example "romantasy",
@@ -95,13 +101,13 @@ namespace RabbitHole.Vision.Worker.Services
             // Fetch embeddings from cache since earlier shelf lookups maybe have generated embeddings for these new books already.
             foreach (var book in newBooks)
             {
-                var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
-                if (cachedBook.HasValue)
-                {
-                    var bookToAdd = new Book(book.Isbn!, cachedBook.Value.Book.Title!, cachedBook.Value.Book.Author!, cachedBook.Value.Book.BookType, cachedBook.Value.Book.GenreGroup, cachedBook.Value.Embedding);
-                    booksToAdd.Add(bookToAdd);
-                }
-                else
+                //var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
+                //if (cachedBook.HasValue)
+                //{
+                //    var bookToAdd = new Book(book.Isbn!, cachedBook.Value.Book.Title!, cachedBook.Value.Book.Author!, cachedBook.Value.Book.BookType, cachedBook.Value.Book.GenreGroup, cachedBook.Value.Embedding);
+                //    booksToAdd.Add(bookToAdd);
+                //}
+                //else
                 {
                     uncachedBooks.Add(book);
                 }
@@ -173,12 +179,14 @@ namespace RabbitHole.Vision.Worker.Services
             // Fetch books embeddings that are in the cache.
             var bookEmbeddings = new List<(CategorisedBook Book, SqlVector<float> Vector)>();
             var uncachedBooks = new List<CategorisedBook>();
+            var cachedBooks = new List<CategorisedBook>();
             foreach (var book in extractedBooks)
             {
                 var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
                 if (cachedBook.HasValue)
                 {
                     bookEmbeddings.Add((book, cachedBook.Value.Embedding));
+                    cachedBooks.Add(book);
                 }
                 else
                 {
@@ -203,7 +211,7 @@ namespace RabbitHole.Vision.Worker.Services
             }
 
             bookEmbeddings.AddRange(successfulEmbeddings);
-            var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(bookEmbeddings, 5, cancellationToken);
+            var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(bookEmbeddings, 7, cancellationToken);
 
             // Fetch ISBN, name, author, genre and summary for each extracted book using Google Books API.
             // While gemini OCR is mostly reliable, small errors could occur.
@@ -228,14 +236,15 @@ namespace RabbitHole.Vision.Worker.Services
 
             // Add retries and rate limits for external API calls to avoid hitting rate limits and to handle transient errors.
 
+            var allExtractedBooks = cachedBooks.Concat(identifiableBooks.Select(b => b.Book)).ToList();
             return new RecommendationResultMessageDto
             {
-                ExtractedBooks = identifiableBooks.Select(b => new BookMessageDto
+                ExtractedBooks = allExtractedBooks.Select(b => new ExtractedBookDto
                 {
-                    Isbn = b.Book.Isbn!,
-                    Name = b.Book.Title!
+                    Name = b.Title!,
+                    Author = b.Author
                 }).ToList(),
-                RecommendedBooks = recommendedBooks.Select(b => new BookMessageDto
+                RecommendedBooks = recommendedBooks.Select(b => new RecommendedBookDto
                 {
                     Isbn = b.Isbn,
                     Name = b.Name

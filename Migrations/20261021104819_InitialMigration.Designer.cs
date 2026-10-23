@@ -13,7 +13,7 @@ using RabbitHole.Vision.Worker;
 namespace RabbitHole.Vision.Worker.Migrations
 {
     [DbContext(typeof(BookStoreContext))]
-    [Migration("20261017064146_InitialMigration")]
+    [Migration("20261021104819_InitialMigration")]
     partial class InitialMigration
     {
         /// <inheritdoc />

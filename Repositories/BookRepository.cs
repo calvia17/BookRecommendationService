@@ -274,7 +274,7 @@ namespace RabbitHole.Vision.Worker.Repositories
                     var clusterCentroid = new SqlVector<float>(cluster.Centroid);
                     var distances = await dbContext.Books
                                         .AsNoTracking()
-                                        .Where(book => !inputBooks.Contains(book.Isbn) && book.BookType == cluster.BookType && book.GenreGroup == cluster.GenreGroup)
+                                        .Where(book => !inputBooks.Contains(book.Name + ", " + book.Author) && book.BookType == cluster.BookType && book.GenreGroup == cluster.GenreGroup)
                                         .Select(book => new { Book = book, CentroidDistance = EF.Functions.VectorDistance("cosine", book.Embedding, clusterCentroid) })
                                         .OrderBy(book => book.CentroidDistance)
                                         .Take(slots)

@@ -8,12 +8,12 @@
         /// <summary>
         /// Gets the extracted books.
         /// </summary>
-        public required List<BookMessageDto> ExtractedBooks { get; init; }
+        public required List<ExtractedBookDto> ExtractedBooks { get; init; }
 
         /// <summary>
         /// Gets the recommended books.
         /// </summary>
-        public required List<BookMessageDto> RecommendedBooks { get; init; }
+        public required List<RecommendedBookDto> RecommendedBooks { get; init; }
 
         /// <summary>
         /// Gets the error.
