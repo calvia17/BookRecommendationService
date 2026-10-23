@@ -120,7 +120,7 @@ namespace RabbitHole.Vision.Worker.Services
             // Log unidentified books here.
             // Continue to add remaining books to the database.
 
-            var identifiableBooks = fetchedBookPairs.Where(b => b.Volume != null).ToList();
+            var identifiableBooks = fetchedBookPairs.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
             var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
 
             foreach (var (book, embedding) in bookEmbeddings)
@@ -130,7 +130,7 @@ namespace RabbitHole.Vision.Worker.Services
                 {
                     var bookToAdd = new Book(book.Isbn!, book.Title!, book.Author!, book.BookType, book.GenreGroup, embedding.Value);
                     booksToAdd.Add(bookToAdd);
-                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(book, embedding.Value, cancellationToken);
+                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(book.Title, book.Author, book, embedding.Value, cancellationToken);
                 }
             }
 
@@ -201,13 +201,26 @@ namespace RabbitHole.Vision.Worker.Services
             // Continue to suggest recommendations for the identified books.
 
             // Calculate embeddings for the books.
-            var identifiableBooks = booksData.Where(b => b.Volume != null).ToList();
+            var identifiableBooks = booksData.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
             var newBookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
             var successfulEmbeddings = newBookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
 
             foreach (var bookEmbedding in successfulEmbeddings)
             {
-                await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+                // We need to store the cache with both the extracted (title, author) as well as the fetched (title, author) because
+                // they may not match exactly. For example, the extracted title may be "The Great Gatsby" while the fetched title from Google Books API may be "The Great Gatsby: A Novel".
+                // Goodle Books API can fix minor errors in the OCR extracted text, so we want to cache the corrected version as well.
+                if (booksData.TryGetValue(bookEmbedding.Book, out var bookDetails))
+                {
+                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookDetails?.VolumeInfo?.Title, bookDetails?.VolumeInfo?.Authors?.FirstOrDefault(), bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+                }
+
+                await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookEmbedding.Book.Title, bookEmbedding.Book.Author, bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+
+                // Update the book details to match the fetched book details from Google Books API if available.
+                // This is so that minor OCR extraction errors can be fixed.
+                bookEmbedding.Book.Title = bookDetails?.VolumeInfo?.Title ?? bookEmbedding.Book.Title;
+                bookEmbedding.Book.Author = bookDetails?.VolumeInfo?.Authors?.FirstOrDefault() ?? bookEmbedding.Book.Author;
             }
 
             bookEmbeddings.AddRange(successfulEmbeddings);
@@ -236,7 +249,7 @@ namespace RabbitHole.Vision.Worker.Services
 
             // Add retries and rate limits for external API calls to avoid hitting rate limits and to handle transient errors.
 
-            var allExtractedBooks = cachedBooks.Concat(identifiableBooks.Select(b => b.Book)).ToList();
+            var allExtractedBooks = cachedBooks.Concat(identifiableBooks.Select(b => b.Key)).ToList();
             return new RecommendationResultMessageDto
             {
                 ExtractedBooks = allExtractedBooks.Select(b => new ExtractedBookDto
@@ -363,13 +376,13 @@ namespace RabbitHole.Vision.Worker.Services
             return categorisedBooks;
         }
 
-        private async Task<List<(CategorisedBook Book, Volume? Volume)>> FetchBooks(List<CategorisedBook> bookDetails, CancellationToken cancellationToken)
+        private async Task<ConcurrentDictionary<CategorisedBook, Volume?>> FetchBooks(List<CategorisedBook> bookDetails, CancellationToken cancellationToken)
         {
             // Fetches in parallel.
             // Running too many parallel requests may result in 429 errors because of rate limiting by the Google Books API.
             // So we need to limit the number of parallel requests to avoid hitting the rate limits.
-            // ConcurrentBag is a thread safe collection that allows multiple threads to add items to it concurrently without throwing exceptions.
-            var result = new ConcurrentBag<(CategorisedBook Book, Volume? Volume)>();
+            // ConcurrentDictionary is a thread safe collection that allows multiple threads to add items to it concurrently without throwing exceptions.
+            var result = new ConcurrentDictionary<CategorisedBook, Volume?>();
             await Parallel.ForEachAsync(
                 bookDetails,
                 new ParallelOptions 
@@ -408,9 +421,7 @@ namespace RabbitHole.Vision.Worker.Services
                                 volume = response?.Items?.FirstOrDefault(x => string.IsNullOrWhiteSpace(lastName) || x.VolumeInfo?.Authors?.Any(author => author.Contains(lastName, StringComparison.OrdinalIgnoreCase)) == true);
                             }
 
-                            book.Title = volume?.VolumeInfo?.Title ?? book.Title;
-                            book.Author = volume?.VolumeInfo?.Authors?.FirstOrDefault() ?? book.Author;
-                            result.Add((book, volume));
+                            result.TryAdd(book, volume);
                             return;
                         }
                         catch (GoogleApiException ex) when (i < maxAttempts && IsTransientFailure(ex.HttpStatusCode))
@@ -429,7 +440,7 @@ namespace RabbitHole.Vision.Worker.Services
 
             // TODO: Check language in image and try to find book with same language from the booksData.
             // That way we can consider the language as parameter for suggesting recommendations too.
-            return result.ToList();
+            return result;
         }
 
         private static bool IsTransientFailure(HttpStatusCode code) => code is HttpStatusCode.RequestTimeout 

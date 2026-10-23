@@ -18,10 +18,12 @@ namespace RabbitHole.Vision.Worker.Services
         /// <summary>
         /// Sets the book details in cache.
         /// </summary>
+        /// <param name="title">The title of the book (used to set the cache key).</param>
+        /// <param name="author">The author of the book (used to set the cache key).</param>
         /// <param name="book">The book.</param>
         /// <param name="embedding">The embedding.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task that represents the asynchronous operation.</returns>
-        Task SetBookDetailsAsync(CategorisedBook book, SqlVector<float> embedding, CancellationToken cancellationToken = default);
+        Task SetBookDetailsAsync(string? title, string? author, CategorisedBook book, SqlVector<float> embedding, CancellationToken cancellationToken = default);
     }
 }

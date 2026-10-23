@@ -58,25 +58,28 @@ namespace RabbitHole.Vision.Worker.Services
         /// <summary>
         /// Sets the book details in cache.
         /// </summary>
+        /// <param name="title">The title of the book (used to set the cache key).</param>
+        /// <param name="author">The author of the book (used to set the cache key).</param>
         /// <param name="book">The book.</param>
         /// <param name="embedding">The embedding.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task that represents the asynchronous operation.</returns>
-        public async Task SetBookDetailsAsync(CategorisedBook book, SqlVector<float> embedding, CancellationToken cancellationToken = default)
+        public async Task SetBookDetailsAsync(string? title, string? author, CategorisedBook book, SqlVector<float> embedding, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(book.Title) || string.IsNullOrWhiteSpace(book.Author))
+            if (string.IsNullOrWhiteSpace(title))
             {
                 return;
             }
 
-            var key = GetCacheKey(book.Title, book.Author);
+            var key = GetCacheKey(title, author ?? string.Empty);
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new CachedBookEntry(book, embedding.Memory.Span.ToArray()));
             await this.cache.SetAsync(
                 key,
                 bytes,
                 new DistributedCacheEntryOptions
                 {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromDays(30) // Cache for 30 days
+                    SlidingExpiration = TimeSpan.FromDays(14),
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromDays(90)
                 },
                 cancellationToken);
         }

@@ -224,10 +224,10 @@ namespace RabbitHole.Vision.Worker.Repositories
                     }
                 }
 
-                // Threshold distance = 0.22 (cosine similarity = 0.78, angle = 38.74 degrees)
-                // Reason for threshold choice: 0.23 causes slight genre bleeding where Contemporary Romance books merge with Fantasy Romance
-                // For best quality, we keep it at 22 which splits the different groups well.
-                // Lower than this would fail to group well.
+                // Threshold distance = 0.25 (cosine similarity = 0.75, angle = 41.41 degrees)
+                // Reason for threshold choice: Higher thresholds cause genre bleeding (Example: Contemporary Romance books merge with Fantasy Romance)
+                // Lower thresholds dont cluster well and books that are very similar dont get clustered together.
+                // For best quality, we keep it at 0.25 which splits the different groups well.
                 if (closestCluster != null && minDistance < 0.25)
                 {
                     // Update the centroid to include the new book in the cluster.
@@ -242,11 +242,8 @@ namespace RabbitHole.Vision.Worker.Repositories
                 }
             }
 
-            // var allBooks = bookEmbeddings.Select(x => x.Book.Title + ": " + string.Join(',', x.Book.BookTags)).ToList();
-
-            // Sort clusters by size and take the top 7 clusters.
+            // Sort clusters by size and take the top 20 clusters.
             // This ensures that we are only considering the most significant clusters for recommendations.
-            var result = clusters.OrderByDescending(cluster => cluster.Size).Select(c => string.Join(',', c.Books.Select(x => x.Title).ToList())).ToList();
             clusters = clusters.OrderByDescending(cluster => cluster.Size).Take(20).ToList();
 
             // Fetch books from the database for each cluster.
@@ -294,17 +291,6 @@ namespace RabbitHole.Vision.Worker.Repositories
                                     .Take(numRecommendations) 
                                     .Select(b => b.Book)
                                     .ToList();
-
-
-            // Next steps:
-            // 1. Seed database with books and test recommendations.
-            // 2. Add update event and check if book already in databse, if not add. No need to try updating databse because we fetch title and author name from google books
-            //      so the initial add either failed or entered correct values.
-            //      So we just need to add again if not in database.
-            // 3. Cache stored book embeddings by ISBN. Search from cache for shelf books first and only if not found, use apis.
-            // 4. Add retries
-            // 5. Add rate limiting
-            // NOTE: Recommendation results aren’t cached, because queries are keyed by per - shelf cluster centroids, which almost never repeat. So it would just be cache pollution.
 
             return recommendedBooks;
         }
