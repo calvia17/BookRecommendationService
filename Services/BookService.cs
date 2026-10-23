@@ -21,6 +21,7 @@ namespace RabbitHole.Vision.Worker.Services
     /// </summary>
     public class BookService : IBookService
     {
+        private const int batchSize = 25;
         private const string ocrExtractionPrompt = """
             Extract the following details for each book from the book spines in the book shelf image.
             - title: the title of the book (extract from the book spine)
@@ -91,46 +92,55 @@ namespace RabbitHole.Vision.Worker.Services
                 return;
             }
 
-            var isbns = books.Select(book => book.Isbn!).ToHashSet();
-            var existingBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
-            var existingIsbns = existingBooks.Select(book => book.Isbn).ToHashSet();
-            var newBooks = books.Where(book => !existingIsbns.Contains(book.Isbn!)).ToList();
+            var numBooks = books.Count();
             var booksToAdd = new List<Book>();
-            var uncachedBooks = new List<BookDetails>();
-
-            // Fetch embeddings from cache since earlier shelf lookups maybe have generated embeddings for these new books already.
-            foreach (var book in newBooks)
+            foreach (var batch in books.Chunk(batchSize))
             {
-                //var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
-                //if (cachedBook.HasValue)
-                //{
-                //    var bookToAdd = new Book(book.Isbn!, cachedBook.Value.Book.Title!, cachedBook.Value.Book.Author!, cachedBook.Value.Book.BookType, cachedBook.Value.Book.GenreGroup, cachedBook.Value.Embedding);
-                //    booksToAdd.Add(bookToAdd);
-                //}
-                //else
+                var isbns = batch.Select(book => book.Isbn!).ToHashSet();
+                var existingBooks = await this.bookRepository.GetByIsbnsAsync(isbns, false, cancellationToken);
+                var existingIsbns = existingBooks.Select(book => book.Isbn).ToHashSet();
+                var newBooks = batch.Where(book => !existingIsbns.Contains(book.Isbn!)).ToList();
+                var uncachedBooks = new List<BookDetails>();
+
+                if (newBooks.Count > 0)
                 {
-                    uncachedBooks.Add(book);
-                }
-            }
+                    // Fetch embeddings from cache since earlier shelf lookups maybe have generated embeddings for these new books already.
+                    foreach (var book in newBooks)
+                    {
+                        var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
+                        if (cachedBook.HasValue)
+                        {
+                            var bookToAdd = new Book(book.Isbn!, cachedBook.Value.Book.Title!, cachedBook.Value.Book.Author!, cachedBook.Value.Book.BookType, cachedBook.Value.Book.GenreGroup, cachedBook.Value.Embedding);
+                            booksToAdd.Add(bookToAdd);
+                        }
+                        else
+                        {
+                            uncachedBooks.Add(book);
+                        }
+                    }
 
-            // Categorize and compute embeddings for uncached books.
-            var categorisedBooks = await CategorizeBooks(uncachedBooks, cancellationToken);
-            var fetchedBookPairs = await FetchBooks(categorisedBooks, cancellationToken);
+                    // Categorize and compute embeddings for uncached books.
+                    var categorisedBooks = await CategorizeBooks(uncachedBooks, cancellationToken);
+                    var fetchedBookPairs = await FetchBooks(categorisedBooks, cancellationToken);
 
-            // Log unidentified books here.
-            // Continue to add remaining books to the database.
+                    // Log unidentified books here.
+                    // Continue to add remaining books to the database.
 
-            var identifiableBooks = fetchedBookPairs.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
-            var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
+                    var identifiableBooks = fetchedBookPairs.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
+                    var bookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
 
-            foreach (var (book, embedding) in bookEmbeddings)
-            {
-                // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
-                if (embedding.HasValue)
-                {
-                    var bookToAdd = new Book(book.Isbn!, book.Title!, book.Author!, book.BookType, book.GenreGroup, embedding.Value);
-                    booksToAdd.Add(bookToAdd);
-                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(book.Title, book.Author, book, embedding.Value, cancellationToken);
+                    foreach (var (book, embedding) in bookEmbeddings)
+                    {
+                        // No need to add book if there is no embedding because without an embedding the book is not useful for recommendations.
+                        if (embedding.HasValue)
+                        {
+                            var bookToAdd = new Book(book.Isbn!, book.Title!, book.Author!, book.BookType, book.GenreGroup, embedding.Value);
+                            booksToAdd.Add(bookToAdd);
+                            await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(book.Title, book.Author, book, embedding.Value, cancellationToken);
+                        }
+                    }
+
+                    await Task.Delay(3000, cancellationToken);
                 }
             }
 
@@ -175,81 +185,63 @@ namespace RabbitHole.Vision.Worker.Services
             // Extract book details from the image using OCR.
             var extractedBooks = await ExtractBooksFromImage(image, cancellationToken);
             extractedBooks = extractedBooks.OrderBy(b => b.Title).ThenBy(b => b.Author).ToList();
-
-            // Fetch books embeddings that are in the cache.
             var bookEmbeddings = new List<(CategorisedBook Book, SqlVector<float> Vector)>();
-            var uncachedBooks = new List<CategorisedBook>();
-            var cachedBooks = new List<CategorisedBook>();
-            foreach (var book in extractedBooks)
+            var allExtractedBooks = new List<CategorisedBook>();
+            foreach (var batch in extractedBooks.Chunk(batchSize))
             {
-                var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
-                if (cachedBook.HasValue)
+                // Fetch books embeddings that are in the cache.
+                var uncachedBooks = new List<CategorisedBook>();
+                var cachedBooks = new List<CategorisedBook>();
+                foreach (var book in batch)
                 {
-                    bookEmbeddings.Add((book, cachedBook.Value.Embedding));
-                    cachedBooks.Add(book);
+                    var cachedBook = await this.cachedBookEmbeddingsProvider.GetBookDetailsAsync(book, cancellationToken);
+                    if (cachedBook.HasValue)
+                    {
+                        bookEmbeddings.Add((book, cachedBook.Value.Embedding));
+                        cachedBooks.Add(book);
+                    }
+                    else
+                    {
+                        uncachedBooks.Add(book);
+                    }
                 }
-                else
+
+                // Fetch the book details from Google Books API.
+                var booksData = await FetchBooks(uncachedBooks, cancellationToken);
+
+                // Log unidentified books here.
+                // Continue to suggest recommendations for the identified books.
+
+                // Calculate embeddings for the books.
+                var identifiableBooks = booksData.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
+                var newBookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
+                var successfulEmbeddings = newBookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
+
+                foreach (var bookEmbedding in successfulEmbeddings)
                 {
-                    uncachedBooks.Add(book);
+                    // We need to store the cache with both the extracted (title, author) as well as the fetched (title, author) because
+                    // they may not match exactly. For example, the extracted title may be "The Great Gatsby" while the fetched title from Google Books API may be "The Great Gatsby: A Novel".
+                    // Goodle Books API can fix minor errors in the OCR extracted text, so we want to cache the corrected version as well.
+                    if (booksData.TryGetValue(bookEmbedding.Book, out var bookDetails))
+                    {
+                        await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookDetails?.VolumeInfo?.Title, bookDetails?.VolumeInfo?.Authors?.FirstOrDefault(), bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+                    }
+
+                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookEmbedding.Book.Title, bookEmbedding.Book.Author, bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
+
+                    // Update the book details to match the fetched book details from Google Books API if available.
+                    // This is so that minor OCR extraction errors can be fixed.
+                    bookEmbedding.Book.Title = bookDetails?.VolumeInfo?.Title ?? bookEmbedding.Book.Title;
+                    bookEmbedding.Book.Author = bookDetails?.VolumeInfo?.Authors?.FirstOrDefault() ?? bookEmbedding.Book.Author;
                 }
+
+                allExtractedBooks.AddRange(cachedBooks.Concat(identifiableBooks.Select(b => b.Key)).ToList());
+                bookEmbeddings.AddRange(successfulEmbeddings);
+                await Task.Delay(3000, cancellationToken);
             }
 
-            // Fetch the book details from Google Books API.
-            var booksData = await FetchBooks(uncachedBooks, cancellationToken);
-
-            // Log unidentified books here.
-            // Continue to suggest recommendations for the identified books.
-
-            // Calculate embeddings for the books.
-            var identifiableBooks = booksData.Where(b => b.Value != null).Select(b => (b.Key, b.Value)).ToList();
-            var newBookEmbeddings = await this.CalculateEmbeddingsAsync(identifiableBooks, cancellationToken);
-            var successfulEmbeddings = newBookEmbeddings.Where(b => b.Vector.HasValue).Select(b => (b.Book, b.Vector!.Value)).ToList();
-
-            foreach (var bookEmbedding in successfulEmbeddings)
-            {
-                // We need to store the cache with both the extracted (title, author) as well as the fetched (title, author) because
-                // they may not match exactly. For example, the extracted title may be "The Great Gatsby" while the fetched title from Google Books API may be "The Great Gatsby: A Novel".
-                // Goodle Books API can fix minor errors in the OCR extracted text, so we want to cache the corrected version as well.
-                if (booksData.TryGetValue(bookEmbedding.Book, out var bookDetails))
-                {
-                    await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookDetails?.VolumeInfo?.Title, bookDetails?.VolumeInfo?.Authors?.FirstOrDefault(), bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
-                }
-
-                await this.cachedBookEmbeddingsProvider.SetBookDetailsAsync(bookEmbedding.Book.Title, bookEmbedding.Book.Author, bookEmbedding.Book, bookEmbedding.Value, cancellationToken);
-
-                // Update the book details to match the fetched book details from Google Books API if available.
-                // This is so that minor OCR extraction errors can be fixed.
-                bookEmbedding.Book.Title = bookDetails?.VolumeInfo?.Title ?? bookEmbedding.Book.Title;
-                bookEmbedding.Book.Author = bookDetails?.VolumeInfo?.Authors?.FirstOrDefault() ?? bookEmbedding.Book.Author;
-            }
-
-            bookEmbeddings.AddRange(successfulEmbeddings);
+            
             var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(bookEmbeddings, 7, cancellationToken);
-
-            // Fetch ISBN, name, author, genre and summary for each extracted book using Google Books API.
-            // While gemini OCR is mostly reliable, small errors could occur.
-            // Google Books API has some tolerance for errors in input so small errors can still return the right expected book.
-            // So we re-fetch name and author as well so that the errors are corrected.
-
-            // Calculate embeddings for each extracted book. We could also fetch visual data from the book covers using computer vision and add this information
-            // to the embeddings. But this is not really necessary for a book recommendation system since the summary and genre are what really matter
-            // for book recommendation systems. If it was an art recommendation system, then visual data would be more important.
-
-            // Query the database for recommended books based on the embeddings. This can be done using nearest neighbour search algorithms such as
-            // Euclidean distance, manhattan distance, cosine similarity, etc.
-            // We can also use k nearest neighbour search algorithms to find the top k recommended books based on the embeddings.
-
-            // If any of the input books are in the recommendatrion results, remove them from the list.
-
-            // Consider putting a limit on the number of recommended books returned in the response to avoid overwhelming the user with too many recommendations.
-
-            // Check if caching is required for stored books so that we don't have to query the database for every recommendation request.
-
-            // Return the extracted books and recommended books in the response.
-
-            // Add retries and rate limits for external API calls to avoid hitting rate limits and to handle transient errors.
-
-            var allExtractedBooks = cachedBooks.Concat(identifiableBooks.Select(b => b.Key)).ToList();
             return new RecommendationResultMessageDto
             {
                 ExtractedBooks = allExtractedBooks.Select(b => new ExtractedBookDto
