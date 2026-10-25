@@ -5,6 +5,7 @@ using Google.GenAI;
 using Google.GenAI.Types;
 using Microsoft.Data.SqlTypes;
 using RabbitHole.Vision.Worker.Dtos;
+using RabbitHole.Vision.Worker.Exceptions;
 using RabbitHole.Vision.Worker.Objects;
 using RabbitHole.Vision.Worker.Repositories;
 using System.Collections.Concurrent;
@@ -29,8 +30,10 @@ namespace RabbitHole.Vision.Worker.Services
             - bookType: Choose the type of the book from the provided list.
             - genreGroup: Choose the genre group of the book from the provided list. If there are multiple genre groups, choose the one that describes the book the best.
             - Use genreGroup 'Romance' if the romantic relationship is the main plotline, or the book is marketed as romance or romantasy. This applies to any setting (fantasy, historical, contemporary, etc.). Check this first.
-            - Use genreGroup 'ScienceFictionFantasy' if the book is science fiction or fantasy where romance is a side element or absent.
-            - Avoid using Unknown or OtherFiction unless it is absolutely not possible to classify into any of the other categories. 
+            - Use genreGroup 'SciFiFantasyActionAdventure' if the book is predominantly science fiction/fantasy/action/adventure where romance is a side element or absent.
+            - Use genreGroup 'Suspense' if the book is predominantly suspense, thriller, mystery, or horror where romance is a side element or absent.
+            - Use genreGroup 'Other' if the book does not fit into any of the above categories.
+            - Avoid using Unknown unless it is absolutely not possible to classify into any of the other categories. 
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first (using your knowledge of the book).
               Use common reader-recognized terms, for example "romantasy",
@@ -46,8 +49,10 @@ namespace RabbitHole.Vision.Worker.Services
             - bookType: the type of the book (from the provided BookType enum options)
             - genreGroup: the genre group of the book (from the provided GenreGroup enum options)
             - Use genreGroup 'Romance' if the romantic relationship is the main plotline, or the book is marketed as romance or romantasy. This applies to any setting (fantasy, historical, contemporary, etc.). Check this first.
-            - Use genreGroup 'ScienceFictionFantasy' if the book is science fiction or fantasy where romance is a side element or absent.
-            - Avoid using Unknown or OtherFiction unless it is absolutely not possible to classify into any of the other categories. 
+            - Use genreGroup 'SciFiFantasyActionAdventure' if the book is predominantly science fiction/fantasy/action/adventure where romance is a side element or absent.
+            - Use genreGroup 'Suspense' if the book is predominantly suspense, thriller, mystery, or horror where romance is a side element or absent.
+            - Use genreGroup 'Other' if the book does not fit into any of the above categories.
+            - Avoid using Unknown unless it is absolutely not possible to classify into any of the other categories. 
             - tags: up to 3 short lowercase tags (1-3 words each) describing the
               book's genre, subgenre, themes and main tropes, most defining first.
               Use common reader-recognized terms, for example "romantasy",
@@ -61,6 +66,16 @@ namespace RabbitHole.Vision.Worker.Services
         private readonly ICachedBookDetailsProvider cachedBookEmbeddingsProvider;
         private readonly Client gemini;
         private readonly BooksService googleBooks;
+
+        private static bool IsTransientGeminiFailure(Exception ex) => ex is ServerError || (ex is ClientError ce && (ce.StatusCode is 408 or 429));
+
+        private static bool IsTransientGoogleBooksFailure(GoogleApiException ex) => ex.HttpStatusCode is HttpStatusCode.RequestTimeout 
+                or HttpStatusCode.InternalServerError 
+                or HttpStatusCode.BadGateway 
+                or HttpStatusCode.ServiceUnavailable 
+                or HttpStatusCode.GatewayTimeout 
+                or HttpStatusCode.TooManyRequests 
+                or HttpStatusCode.ServiceUnavailable;
 
         /// <summary>
         /// Initializes the book service.
@@ -140,7 +155,10 @@ namespace RabbitHole.Vision.Worker.Services
                         }
                     }
 
-                    await Task.Delay(3000, cancellationToken);
+                    if (uncachedBooks.Count > 0)
+                    {
+                        await Task.Delay(3000, cancellationToken);
+                    }
                 }
             }
 
@@ -237,10 +255,17 @@ namespace RabbitHole.Vision.Worker.Services
 
                 allExtractedBooks.AddRange(cachedBooks.Concat(identifiableBooks.Select(b => b.Key)).ToList());
                 bookEmbeddings.AddRange(successfulEmbeddings);
-                await Task.Delay(3000, cancellationToken);
+                if (uncachedBooks.Count > 0)
+                {
+                    await Task.Delay(3000, cancellationToken);
+                }
             }
 
-            
+            if (bookEmbeddings.Count == 0)
+            {
+                throw new BookIdentificationException();
+            }
+
             var recommendedBooks = await this.bookRepository.GetRecommendedBooksAsync(bookEmbeddings, 7, cancellationToken);
             return new RecommendationResultMessageDto
             {
@@ -301,16 +326,8 @@ namespace RabbitHole.Vision.Worker.Services
                     }
                 }
             };
-
-            // Extract the book titles and authors from the image using OCR.
-            // TODO: Add retry logic and rate limiting here.
-            var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                Converters = { new JsonStringEnumConverter() }
-            };
-            var extractedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
+            
+            var extractedBooks = await ComputeOCR(contents, config, cancellationToken);
             return extractedBooks;
         }
 
@@ -357,15 +374,41 @@ namespace RabbitHole.Vision.Worker.Services
                 }
             };
 
-            // TODO: Add retry logic and rate limiting here.
-            var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
+            var categorisedBooks = await this.ComputeOCR(contents, config, cancellationToken);
+            return categorisedBooks;
+        }
+
+        private async Task<List<CategorisedBook>> ComputeOCR(Content contents, GenerateContentConfig config, CancellationToken cancellationToken)
+        {
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
                 Converters = { new JsonStringEnumConverter() }
             };
-            var categorisedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
-            return categorisedBooks;
+
+            var maxAttempts = 3;
+            for (var i = 1; i <= maxAttempts; i++)
+            {
+                try
+                {
+                    // Extract the book titles and authors from the image using OCR.
+                    var result = await this.gemini.Models.GenerateContentAsync("gemini-3.5-flash", contents, config, cancellationToken);
+                    var extractedBooks = JsonSerializer.Deserialize<List<CategorisedBook>>(result.Text ?? "[]", options) ?? [];
+                    return extractedBooks;
+                }
+                catch (Exception ex) when (i < maxAttempts && IsTransientGeminiFailure(ex))
+                {
+                    // Random.Shared() is thread safe.
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, i) + Random.Shared.NextDouble() * 2), cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Log the error here and let it throw so that Azure can retry the request.
+                    throw;
+                }
+            }
+
+            return [];
         }
 
         private async Task<ConcurrentDictionary<CategorisedBook, Volume?>> FetchBooks(List<CategorisedBook> bookDetails, CancellationToken cancellationToken)
@@ -416,7 +459,7 @@ namespace RabbitHole.Vision.Worker.Services
                             result.TryAdd(book, volume);
                             return;
                         }
-                        catch (GoogleApiException ex) when (i < maxAttempts && IsTransientFailure(ex.HttpStatusCode))
+                        catch (GoogleApiException ex) when (i < maxAttempts && IsTransientGoogleBooksFailure(ex))
                         {
                             // Random.Shared() is thread safe.
                             await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, i) + Random.Shared.NextDouble() * 2), cancellationToken);
@@ -434,14 +477,6 @@ namespace RabbitHole.Vision.Worker.Services
             // That way we can consider the language as parameter for suggesting recommendations too.
             return result;
         }
-
-        private static bool IsTransientFailure(HttpStatusCode code) => code is HttpStatusCode.RequestTimeout 
-                or HttpStatusCode.InternalServerError 
-                or HttpStatusCode.BadGateway 
-                or HttpStatusCode.ServiceUnavailable 
-                or HttpStatusCode.GatewayTimeout 
-                or HttpStatusCode.TooManyRequests 
-                or HttpStatusCode.ServiceUnavailable;
 
         private async Task<List<(CategorisedBook Book, SqlVector<float>? Vector)>> CalculateEmbeddingsAsync(List<(CategorisedBook Book, Volume? Volume)> books, CancellationToken cancellationToken)
         {
@@ -496,32 +531,51 @@ namespace RabbitHole.Vision.Worker.Services
                 });
             }
 
-            // From Gemini docs: While the default 3072-dimension embeddings are always normalized, Gemini Embedding 2 also auto-normalizes truncated dimensions (e.g., 768, 1536).
-            // This ensures semantic similarity is calculated via vector direction rather than magnitude, providing more accurate results out of the box.
-            // Older Models: If you are using gemini-embedding - 001, you must manually normalize non - 3072 dimensions.
-            // So we use "gemini-embedding-2" for embeddings since we need normalized embeddings to calculate cosine similarity for book recommendations.
-            var embedding = await this.gemini.Models.EmbedContentAsync(
-                "gemini-embedding-2",
-                contents: embeddingContent!,
-                embeddingConfig,
-                cancellationToken);
-            var sqlVectors = new List<SqlVector<float>?>();
-            foreach (var vector in embedding.Embeddings ?? [])
+            var maxAttempts = 3;
+            for (var i = 1; i <= maxAttempts; i++)
             {
-                if (vector.Values == null)
+                try
                 {
-                    sqlVectors.Add(null);
+                    // From Gemini docs: While the default 3072-dimension embeddings are always normalized, Gemini Embedding 2 also auto-normalizes truncated dimensions (e.g., 768, 1536).
+                    // This ensures semantic similarity is calculated via vector direction rather than magnitude, providing more accurate results out of the box.
+                    // Older Models: If you are using gemini-embedding - 001, you must manually normalize non - 3072 dimensions.
+                    // So we use "gemini-embedding-2" for embeddings since we need normalized embeddings to calculate cosine similarity for book recommendations.
+                    var embedding = await this.gemini.Models.EmbedContentAsync(
+                        "gemini-embedding-2",
+                        contents: embeddingContent!,
+                        embeddingConfig,
+                        cancellationToken);
+                    var sqlVectors = new List<SqlVector<float>?>();
+                    foreach (var vector in embedding.Embeddings ?? [])
+                    {
+                        if (vector.Values == null)
+                        {
+                            sqlVectors.Add(null);
+                        }
+                        else
+                        {
+                            var sqlVector = new SqlVector<float>(vector.Values.Select(value => (float)value).ToArray());
+                            sqlVectors.Add(sqlVector);
+                        }
+                    }
+
+                    // Embeddings are ordered in the same order as the inout books so we can zip it.
+                    var bookEmbeddings = books.Zip(sqlVectors ?? [], (book, vector) => (book.Book, vector)).ToList();
+                    return bookEmbeddings;
                 }
-                else
+                catch (Exception ex) when (i < maxAttempts && IsTransientGeminiFailure(ex))
                 {
-                    var sqlVector = new SqlVector<float>(vector.Values.Select(value => (float)value).ToArray());
-                    sqlVectors.Add(sqlVector);
+                    // Random.Shared() is thread safe.
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, i) + Random.Shared.NextDouble() * 2), cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Log the error here and let it throw so that Azure can retry the request.
+                    throw;
                 }
             }
 
-            // Embeddings are ordered in the same order as the inout books so we can zip it.
-            var bookEmbeddings = books.Zip(sqlVectors ?? [], (book, vector) => (book.Book, vector)).ToList();
-            return bookEmbeddings;
+            return [];
         }
     }
 }

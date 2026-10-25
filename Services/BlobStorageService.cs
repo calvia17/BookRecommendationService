@@ -61,11 +61,11 @@ namespace RabbitHole.Vision.Worker.Services
             {
                 var image = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
                 using var imageValue = image.Value;
-                var imageStream = new MemoryStream();
+                using var imageStream = new MemoryStream();
                 await imageValue.Content.CopyToAsync(imageStream, cancellationToken);
                 imageStream.Position = 0;
                 var imageInfo = await Image.IdentifyAsync(imageStream, cancellationToken);
-                var extension = imageInfo.Metadata.DecodedImageFormat?.Name.ToLower();
+                var extension = imageInfo?.Metadata?.DecodedImageFormat?.Name?.ToLower();
                 if (imageInfo == null
                     || imageInfo.Width == 0
                     || imageInfo.Height == 0
@@ -82,7 +82,7 @@ namespace RabbitHole.Vision.Worker.Services
             }
             catch (RequestFailedException)
             {
-                // TODO: Add retries, then log and throw so that azure can retry the message.
+                // Log message here.
                 throw;
             }
             catch (Exception ex) when (ex is InvalidImageContentException or UnknownImageFormatException)

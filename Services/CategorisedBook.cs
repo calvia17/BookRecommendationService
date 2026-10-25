@@ -36,7 +36,7 @@ namespace RabbitHole.Vision.Worker.Services
         {
             this.BookType = bookType;
             this.GenreGroup = genreGroup;
-            this.BookTags = bookTags;
+            this.BookTags = bookTags ?? [];
         }
     }
 }

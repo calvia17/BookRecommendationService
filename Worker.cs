@@ -100,10 +100,8 @@ namespace RabbitHole.Vision.Worker
                     }
                     catch (Exception ex) when (ex is ArgumentException 
                         or JsonException 
-                        or InvalidImageException 
-                        or BookExtractionException 
-                        or BookIdentificationException 
-                        or EmbeddingCalculationException)
+                        or InvalidImageException
+                        or BookIdentificationException)
                     {
                         var recommendations = new RecommendationResultMessageDto
                         {

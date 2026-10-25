@@ -9,7 +9,7 @@
         /// Initializes a new instance of the <see cref="BookIdentificationException" /> class.
         /// </summary>
         public BookIdentificationException()
-            : base("No identifiable books were found in the image.")
+            : base("Failed to identify the books.")
         {
         }
     }
